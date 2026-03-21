@@ -1,1 +1,23 @@
+# Core numerical libraries
+numpy>=1.24
+pandas>=2.0
 
+# Optimization
+gurobipy>=11.0
+
+# Simulation
+simpy>=4.0
+
+# Visualization
+matplotlib>=3.7
+seaborn>=0.12
+
+# Data utilities
+scipy>=1.10
+
+# Progress bars for experiments
+tqdm>=4.65
+
+# Jupyter for analysis notebooks
+jupyter>=1.0
+ipykernel>=6.0
