@@ -54,7 +54,7 @@ python -m src.experiments.run_single_case
 pip install -r requirements.txt
 ```
 
-## Run one experiment
+## Run one grid search
 
 From the repository root:
 
@@ -62,5 +62,4 @@ From the repository root:
 python -m src.experiments.run_grid_search
 ```
 
-
-Note: Gurobi requires a valid license.
+Note: Gurobi requires a valid license for grid search due to the parameter size.
