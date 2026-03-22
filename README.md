@@ -35,8 +35,11 @@ src/
 │   └── simpy_cross_day_breakdown.py
 ├── experiments/
 │   └── run_single_case.py
+│   └── run_grid_search.py
 ├── visualization/
 │   └── plot_heatmaps.py
+│   └── plot_phase_diagram.py
+│   └── plot_gantt.py
 └── utils/
 ```
 
