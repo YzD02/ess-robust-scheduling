@@ -1,77 +1,175 @@
-"""Run one fully documented end-to-end experiment.
-
-This script is the quickest way to verify that the package works.
-It performs four steps:
-
-1. Define one stress-test instance.
-2. Compute robust processing times.
-3. Solve the baseline Gurobi planning model.
-4. Validate the resulting schedule with cross-day breakdown simulation.
-
-Run from the repository root:
-    python -m src.experiments.run_single_case
 """
+run_single_case.py
+==================
 
+Run one complete end-to-end ESS robust scheduling experiment.
+
+Pipeline
+--------
+1. Build one 4-week / 30-job planning instance
+2. Compute robust processing times using the shared model utility
+3. Solve the baseline Gurobi planning model
+4. Run one stochastic cross-day execution sample path
+5. Export a Gantt event-log CSV
+6. Run Monte Carlo summary validation
+
+"""
 from __future__ import annotations
 
-from src.models.gurobi_baseline import solve_gurobi_baseline
+from pathlib import Path
+import random
+import pandas as pd
+
 from src.models.robust_processing import compute_robust_processing_times
+from src.models.gurobi_baseline import solve_gurobi_baseline
 from src.simulation.simpy_cross_day_breakdown import (
-    monte_carlo_breakdown_analysis,
-    print_monte_carlo_summary,
-    print_single_run_result,
+    SimulationPolicy,
+    MachineStopConfig,
     simulate_horizon_with_backlog,
+    monte_carlo_breakdown_analysis,
+    print_single_run_result,
+    print_monte_carlo_summary,
+    event_log_to_dataframe,
 )
 
 
-def main() -> None:
-    # -------------------------
-    # Stress-test toy instance
-    # -------------------------
-    jobs = list(range(1, 16))
-    days = list(range(1, 6))
+# =================================================
+# 1. Base job profiles
+# =================================================
 
-    # Station A: Automated Busbar Assembly
-    mu_A = {
-        1: 88,  2: 80,  3: 96,  4: 84,  5: 92,
-        6: 76,  7: 104, 8: 86,  9: 94, 10: 78,
-        11: 100, 12: 87, 13: 90, 14: 79, 15: 102,
+BASE_MU_A = {
+    1: 88,  2: 80,  3: 96,  4: 84,  5: 92,
+    6: 76,  7: 104, 8: 86,  9: 94, 10: 78,
+    11: 100, 12: 87, 13: 90, 14: 79, 15: 102,
+}
+
+BASE_MU_B = {
+    1: 62,  2: 54,  3: 68,  4: 58,  5: 60,
+    6: 50,  7: 74,  8: 55,  9: 66, 10: 52,
+    11: 72, 12: 57, 13: 59, 14: 51, 15: 70,
+}
+
+BASE_SIGMA_A = {
+    1: 14, 2: 12, 3: 15, 4: 13, 5: 14,
+    6: 11, 7: 17, 8: 12, 9: 15, 10: 11,
+    11: 16, 12: 12, 13: 13, 14: 11, 15: 16,
+}
+
+BASE_SIGMA_B = {
+    1: 18, 2: 16, 3: 20, 4: 17, 5: 18,
+    6: 15, 7: 22, 8: 16, 9: 19, 10: 15,
+    11: 21, 12: 16, 13: 17, 14: 15, 15: 21,
+}
+
+
+# =================================================
+# 2. Reusable instance builder
+# =================================================
+
+def build_reusable_instance(
+    *,
+    n_jobs: int,
+    n_days: int,
+    mu_scale: float = 1.0,
+    sigma_scale: float = 1.0,
+    seed: int = 42,
+    add_small_perturbation: bool = True,
+) -> dict:
+    """
+    Build a reusable planning instance by extending the base job profiles.
+
+    Logic
+    -----
+    - If n_jobs <= number of base profiles:
+        use the first n_jobs profiles
+    - If n_jobs > number of base profiles:
+        cycle through the base profiles repeatedly
+    - Optionally add small multiplicative perturbations so repeated jobs
+      are not perfectly identical
+
+    This keeps run_single_case.py aligned with the grid-search philosophy.
+    """
+    random.seed(seed)
+
+    jobs = list(range(1, n_jobs + 1))
+    days = list(range(1, n_days + 1))
+
+    base_keys = sorted(BASE_MU_A.keys())
+    n_base = len(base_keys)
+
+    mu_A = {}
+    mu_B = {}
+    sigma_A = {}
+    sigma_B = {}
+
+    for j in jobs:
+        base_id = base_keys[(j - 1) % n_base]
+
+        if add_small_perturbation:
+            pert_mu_A = random.uniform(0.97, 1.03)
+            pert_mu_B = random.uniform(0.97, 1.03)
+            pert_sig_A = random.uniform(0.97, 1.03)
+            pert_sig_B = random.uniform(0.97, 1.03)
+        else:
+            pert_mu_A = pert_mu_B = pert_sig_A = pert_sig_B = 1.0
+
+        mu_A[j] = BASE_MU_A[base_id] * mu_scale * pert_mu_A
+        mu_B[j] = BASE_MU_B[base_id] * mu_scale * pert_mu_B
+        sigma_A[j] = BASE_SIGMA_A[base_id] * sigma_scale * pert_sig_A
+        sigma_B[j] = BASE_SIGMA_B[base_id] * sigma_scale * pert_sig_B
+
+    return {
+        "jobs": jobs,
+        "days": days,
+        "mu_A": mu_A,
+        "mu_B": mu_B,
+        "sigma_A": sigma_A,
+        "sigma_B": sigma_B,
     }
 
-    # Station B: Manual Harness Alignment and Riveting
-    mu_B = {
-        1: 62,  2: 54,  3: 68,  4: 58,  5: 60,
-        6: 50,  7: 74,  8: 55,  9: 66, 10: 52,
-        11: 72, 12: 57, 13: 59, 14: 51, 15: 70,
-    }
 
-    # sigma_A = machine-side variability at Station A
-    sigma_A = {
-        1: 14, 2: 12, 3: 15, 4: 13, 5: 14,
-        6: 11, 7: 17, 8: 12, 9: 15, 10: 11,
-        11: 16, 12: 12, 13: 13, 14: 11, 15: 16,
-    }
+# =================================================
+# 3. Main experiment
+# =================================================
 
-    # sigma_B = human-side variability at Station B
-    sigma_B = {
-        1: 18, 2: 16, 3: 20, 4: 17, 5: 18,
-        6: 15, 7: 22, 8: 16, 9: 19, 10: 15,
-        11: 21, 12: 16, 13: 17, 14: 15, 15: 21,
-    }
+def main():
+    # -------------------------------------------------
+    # A. Single-case experiment settings
+    # -------------------------------------------------
+    # Here you can freely change n_jobs without rewriting all dictionaries.
+    n_jobs = 50
+    n_days = 20
 
-    # Planning and simulation parameters
+    mu_scale = 1.0
+    sigma_scale = 1.0
+    random_seed = 42
+
+    instance = build_reusable_instance(
+        n_jobs=n_jobs,
+        n_days=n_days,
+        mu_scale=mu_scale,
+        sigma_scale=sigma_scale,
+        seed=random_seed,
+        add_small_perturbation=True,
+    )
+
+    jobs = instance["jobs"]
+    days = instance["days"]
+    mu_A = instance["mu_A"]
+    mu_B = instance["mu_B"]
+    sigma_A = instance["sigma_A"]
+    sigma_B = instance["sigma_B"]
+
+    # -------------------------------------------------
+    # B. Planning-layer parameters
+    # -------------------------------------------------
+    k = 1.0
     C_std = 480.0
     Cost_OT = 5.0
     Cost_fix = 180.0
-    M = 1200.0
-    k = 1.0
+    M = 2000.0
+    time_limit_sec = 900.0
 
-    regular_shift = 480.0
-    max_overtime_per_day = 120.0
-
-    # -------------------------
-    # Robust processing times
-    # -------------------------
     p_nominal, p_robust = compute_robust_processing_times(
         mu_A=mu_A,
         mu_B=mu_B,
@@ -80,18 +178,24 @@ def main() -> None:
         k=k,
     )
 
-    print("\nRobust processing times")
-    print("=======================")
-    for j in jobs:
-        print(
-            f"Job {j:2d}: nominal = {p_nominal[j]:7.2f}, "
-            f"robust = {p_robust[j]:7.2f}"
-        )
+    # -------------------------------------------------
+    # C. Execution-layer parameters
+    # -------------------------------------------------
+    policy = SimulationPolicy(
+        regular_shift=480.0,
+        max_overtime_per_day=120.0,
+    )
 
-    # -------------------------
-    # Gurobi planning layer
-    # -------------------------
-    result = solve_gurobi_baseline(
+    stop_cfg = MachineStopConfig(
+        mean_uptime_between_stops=68.57,
+        mean_stop_duration=8.0,
+        stop_duration_cv=1.0,
+    )
+
+    # -------------------------------------------------
+    # D. Solve Gurobi baseline
+    # -------------------------------------------------
+    gurobi_result = solve_gurobi_baseline(
         jobs=jobs,
         days=days,
         p_robust=p_robust,
@@ -99,61 +203,125 @@ def main() -> None:
         Cost_OT=Cost_OT,
         Cost_fix=Cost_fix,
         M=M,
+        time_limit_sec=time_limit_sec,
         output_flag=1,
     )
 
-    print("\nGurobi planning result")
-    print("======================")
-    print(f"status          : {result.status}")
-    print(f"solve time (s)  : {result.solve_time_sec:.2f}")
-    print(f"objective value : {result.objective_value}")
+    print("\n==============================")
+    print("Gurobi Result")
+    print("==============================")
+    print("Status               :", gurobi_result.status)
+    print("Solve time (sec)     :", round(gurobi_result.solve_time_sec, 3))
+    print("Objective value      :", gurobi_result.objective_value)
+    print("Planned total OT     :", gurobi_result.planned_total_ot)
+    print("Days with planned OT :", gurobi_result.n_days_with_planned_ot)
 
-    if result.sorted_schedule is None:
-        print("No feasible solution was returned by Gurobi.")
+    if gurobi_result.sorted_schedule is None:
+        print("\nNo usable schedule was produced by the planning model.")
         return
 
-    print("\nRaw day assignment:")
-    for t in days:
-        day_jobs = result.raw_schedule[t]
-        robust_load = sum(p_robust[j] for j in day_jobs)
-        print(
-            f"Day {t}: jobs = {day_jobs}, "
-            f"robust load = {robust_load:.2f}, "
-            f"OT = {result.overtime_by_day[t]:.2f}, "
-            f"active = {result.active_by_day[t]}"
-        )
+    schedule = gurobi_result.sorted_schedule
 
-    print("\nPost-processed within-day sequence (shortest robust job first):")
-    for t in days:
-        print(f"Day {t}: {result.sorted_schedule[t]}")
+    print("\nPlanned schedule (post-processed order):")
+    for day in sorted(schedule.keys()):
+        if schedule[day]:
+            print(f"Day {day}: {schedule[day]}")
 
-    # -------------------------
-    # Cross-day simulation layer
-    # -------------------------
+    # -------------------------------------------------
+    # E. One stochastic sample path
+    # -------------------------------------------------
     one_run = simulate_horizon_with_backlog(
-        schedule_dict=result.sorted_schedule,
+        schedule_dict=schedule,
         mu_A=mu_A,
         mu_B=mu_B,
-        sigma_A=sigma_A,
         sigma_B=sigma_B,
-        regular_shift=regular_shift,
-        max_overtime_per_day=max_overtime_per_day,
+        policy=policy,
+        stop_cfg=stop_cfg,
         seed=42,
+        simulation_run=1,
     )
+
     print_single_run_result(one_run)
 
+    # -------------------------------------------------
+    # F. Export Gantt event log
+    # -------------------------------------------------
+    out_dir = Path("results/simulation_outputs")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    gantt_df = event_log_to_dataframe(one_run.event_log)
+    gantt_df["lane"] = gantt_df.apply(
+        lambda r: f"Day {int(r['executed_day'])} - Station {r['station']}",
+        axis=1
+    )
+
+    gantt_csv_path = out_dir / "gantt_events_single_run.csv"
+    gantt_df.to_csv(gantt_csv_path, index=False)
+    print(f"\nSaved Gantt event log to: {gantt_csv_path}")
+
+    # -------------------------------------------------
+    # G. Day summary export
+    # -------------------------------------------------
+    day_rows = []
+    for day in sorted(one_run.days.keys()):
+        d = one_run.days[day]
+        day_rows.append({
+            "day": day,
+            "planned_jobs": str(d.planned_jobs),
+            "backlog_jobs_in": str(d.backlog_jobs_in),
+            "realized_queue": str(d.realized_queue),
+            "executed_sequence": str(d.executed_sequence),
+            "unfinished_sequence": str(d.unfinished_sequence),
+            "used_time": d.used_time,
+            "overtime": d.overtime,
+            "backlog_end_of_day": d.backlog_end_of_day,
+        })
+
+    day_summary_df = pd.DataFrame(day_rows)
+    day_summary_csv_path = out_dir / "single_run_day_summary.csv"
+    day_summary_df.to_csv(day_summary_csv_path, index=False)
+    print(f"Saved day summary to: {day_summary_csv_path}")
+
+    # -------------------------------------------------
+    # H. Monte Carlo summary
+    # -------------------------------------------------
+    n_replications = 100
+
     summary = monte_carlo_breakdown_analysis(
-        schedule_dict=result.sorted_schedule,
+        schedule_dict=schedule,
         mu_A=mu_A,
         mu_B=mu_B,
-        sigma_A=sigma_A,
         sigma_B=sigma_B,
-        regular_shift=regular_shift,
-        max_overtime_per_day=max_overtime_per_day,
-        n_replications=100,
+        policy=policy,
+        stop_cfg=stop_cfg,
+        n_replications=n_replications,
         base_seed=42,
     )
-    print_monte_carlo_summary(summary, n_replications=100)
+
+    print_monte_carlo_summary(summary, n_replications)
+
+    summary_df = pd.DataFrame([{
+        "n_jobs": len(jobs),
+        "n_days": len(days),
+        "mu_scale": mu_scale,
+        "sigma_scale": sigma_scale,
+        "k": k,
+        "avg_nominal_job_time": sum(p_nominal.values()) / len(p_nominal),
+        "avg_robust_job_time": sum(p_robust.values()) / len(p_robust),
+        "avg_total_overtime": summary["avg_total_overtime"],
+        "max_total_overtime": summary["max_total_overtime"],
+        "prob_terminal_backlog": summary["prob_terminal_backlog"],
+        "avg_terminal_backlog": summary["avg_terminal_backlog"],
+        "avg_max_backlog": summary["avg_max_backlog"],
+        "prob_cleared_within_horizon": summary["prob_cleared_within_horizon"],
+        "avg_n_spillover_days": summary["avg_n_spillover_days"],
+        "prob_any_spillover": summary["prob_any_spillover"],
+        "avg_first_spillover_day": summary["avg_first_spillover_day"],
+    }])
+
+    summary_csv_path = out_dir / "single_run_mc_summary.csv"
+    summary_df.to_csv(summary_csv_path, index=False)
+    print(f"Saved Monte Carlo summary to: {summary_csv_path}")
 
 
 if __name__ == "__main__":
