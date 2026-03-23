@@ -1,79 +1,31 @@
+from __future__ import annotations
+
 """
 plot_heatmaps.py
 ================
 
-This script automatically generates heatmap dashboards from the grid search
-results of the ESS robust scheduling experiments.
+Heatmap dashboard for the weekend-extension grid search results.
 
-The goal of the visualization is to show how system performance changes across
-different hyperparameter combinations, including:
+This script is tailored for the CSV produced by:
 
-    - n_jobs        : number of jobs scheduled within the planning horizon
-    - mu_scale      : scaling factor applied to nominal processing times
-    - sigma_scale   : scaling factor applied to processing time variability
-    - k             : robustness parameter used in the robust processing time
-                      formulation p'_j = μ_j + k σ_j
+    run_grid_search_weekend_extension.py
 
-Key Features
-------------
-1. Automatic hyperparameter detection
-   The script inspects the CSV file and detects which hyperparameters vary.
-   This allows the visualization to adapt automatically to different
-   experiments without rewriting plotting code.
+Main goals
+----------
+1. Show the operational performance of the new execution logic:
+   - 20 weekday bins
+   - 8 weekend extension bins
+   - no same-day overtime completion
+   - backlog-first execution
 
-2. Automatic axis selection
-   - x-axis: n_jobs (preferred)
-   - y-axis: first remaining varying hyperparameter
-   - remaining hyperparameters become slice conditions (facets)
+2. Make the result interpretable by plotting both:
+   - outcome metrics
+   - parameter-scale metrics
 
-3. Automatic slicing
-   If multiple hyperparameters vary, the script generates a separate heatmap
-   dashboard for each hyperparameter combination.
-
-4. Multi-metric dashboard
-   Each generated figure contains several heatmaps, including:
-
-       • Probability of clearing horizon
-       • Gurobi solve time
-       • Average overtime
-       • Nominal workload
-       • Robust workload
-       • Robustness buffer size
-
-5. Automatic file naming
-   Output figures include hyperparameter values in the filename so that
-   multiple experiments can coexist in the same results folder.
-
-Input
------
-CSV produced by run_grid_search.py
-
-Expected columns include:
-
-    n_jobs
-    mu_scale
-    sigma_scale
-    k
-    prob_cleared_within_horizon
-    solve_time_sec
-    avg_total_overtime
-    avg_nominal_load_per_day
-    avg_robust_load_per_day
-    k_buffer_mean
-
-Output
-------
-PNG heatmap dashboards saved in:
-
-    results/figures/
-
-Example
--------
-python -m src.visualization.plot_heatmaps \
-    --csv results/grid_search/grid_search_results.csv
+Typical usage
+-------------
+python -m src.visualization.plot_heatmaps --csv results/grid_search/grid_search_results_weekend_extension.csv
 """
-
-from __future__ import annotations
 
 import argparse
 from itertools import product
@@ -87,27 +39,15 @@ import pandas as pd
 HYPERPARAM_COLS = ["n_jobs", "mu_scale", "sigma_scale", "k"]
 
 
+# =====================================================
+# 1. HELPERS
+# =====================================================
+
 def load_results(csv_path: str) -> pd.DataFrame:
-    """
-    Load the grid search result CSV.
-
-    This function also normalizes boolean columns that may have been saved
-    as strings (e.g., "true"/"false") during CSV export.
-
-    Parameters
-    ----------
-    csv_path : str
-        Path to the grid search results CSV file.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Cleaned dataframe ready for visualization.
-    """
+    """Load CSV and normalize boolean-like columns."""
     df = pd.read_csv(csv_path)
 
-    # normalize booleans if saved as strings
-    bool_cols = ["accepted_for_simulation", "meets_95_constraint", "system_ok"]
+    bool_cols = ["accepted_for_simulation", "system_ok"]
     for col in bool_cols:
         if col in df.columns and df[col].dtype != bool:
             mapped = (
@@ -124,20 +64,7 @@ def load_results(csv_path: str) -> pd.DataFrame:
 
 
 def get_varying_hyperparams(df: pd.DataFrame) -> list[str]:
-    """
-    Detect which hyperparameters vary in the dataset.
-
-    A hyperparameter is considered "varying" if it has more than one
-    unique value in the CSV.
-
-    This detection allows the plotting script to automatically adapt
-    to different experiment configurations.
-
-    Returns
-    -------
-    list[str]
-        List of varying hyperparameter names.
-    """
+    """Return hyperparameter columns that actually vary in the CSV."""
     varying = []
     for col in HYPERPARAM_COLS:
         if col in df.columns and df[col].nunique(dropna=True) > 1:
@@ -147,31 +74,14 @@ def get_varying_hyperparams(df: pd.DataFrame) -> list[str]:
 
 def choose_axes(varying_params: list[str]) -> tuple[str, str | None, list[str]]:
     """
-    Determine which hyperparameters should be used as heatmap axes.
+    Choose x-axis, y-axis, and facet columns automatically.
 
-    Strategy
+    Priority
     --------
-    1. Prefer 'n_jobs' as the x-axis when available
-    2. Use the next varying hyperparameter as the y-axis
-    3. Remaining hyperparameters become slicing dimensions
-
-    Example
-    -------
-    If varying parameters are:
-
-        [n_jobs, sigma_scale, k]
-
-    Then:
-
-        x-axis = n_jobs
-        y-axis = sigma_scale
-        facets = [k]
-
-    Returns
-    -------
-    x_col : str
-    y_col : str
-    facet_cols : list[str]
+    - x-axis: n_jobs if available
+    - y-axis: k if available among remaining
+    - otherwise use the first remaining varying parameter
+    - the rest become facet/slice conditions
     """
     if not varying_params:
         return "n_jobs", None, []
@@ -182,38 +92,26 @@ def choose_axes(varying_params: list[str]) -> tuple[str, str | None, list[str]]:
     if not remaining:
         return x_col, None, []
 
-    y_col = remaining[0]
-    facet_cols = remaining[1:]
+    if "k" in remaining:
+        y_col = "k"
+    else:
+        y_col = remaining[0]
 
+    facet_cols = [c for c in remaining if c != y_col]
     return x_col, y_col, facet_cols
 
 
 def unique_sorted(series: pd.Series):
-    vals = sorted(series.dropna().unique().tolist())
-    return vals
+    return sorted(series.dropna().unique().tolist())
 
 
 def iter_facet_slices(df: pd.DataFrame, facet_cols: list[str]):
     """
-    Iterate over all hyperparameter slice combinations.
+    Yield all facet slices.
 
-    If multiple hyperparameters remain after axis selection, the
-    dataset is split into smaller slices. Each slice corresponds
-    to one fixed hyperparameter combination.
-
-    Example
-    -------
-    If facet columns are:
-
-        sigma_scale = [1.0, 1.2]
-        k = [1.0, 1.5]
-
-    The function will generate four slices:
-
-        sigma_scale=1.0, k=1.0
-        sigma_scale=1.0, k=1.5
-        sigma_scale=1.2, k=1.0
-        sigma_scale=1.2, k=1.5
+    Example:
+    if facet_cols = [mu_scale, sigma_scale], then one slice is
+    mu_scale=1.0, sigma_scale=1.2
     """
     if not facet_cols:
         yield "all", df.copy()
@@ -226,8 +124,7 @@ def iter_facet_slices(df: pd.DataFrame, facet_cols: list[str]):
         for c, v in zip(facet_cols, combo):
             sub = sub[np.isclose(sub[c], v)]
             parts.append(f"{c}-{v}")
-        slice_name = "__".join(parts)
-        yield slice_name, sub
+        yield "__".join(parts), sub
 
 
 def make_pivot(df: pd.DataFrame, value_col: str, x_col: str, y_col: str) -> pd.DataFrame:
@@ -249,6 +146,20 @@ def format_cell(val, mode="float", decimals=1) -> str:
         return f"{int(round(val))}"
     return f"{val:.{decimals}f}"
 
+
+def sanitize_name(name: str) -> str:
+    return (
+        name.replace(" ", "_")
+        .replace("/", "-")
+        .replace("=", "-")
+        .replace(",", "_")
+        .replace(".", "p")
+    )
+
+
+# =====================================================
+# 2. PLOTTING
+# =====================================================
 
 def plot_one_heatmap(ax, pivot_df, title, mode="float", decimals=1, vmin=None, vmax=None):
     values = pivot_df.values.astype(float)
@@ -281,16 +192,6 @@ def plot_one_heatmap(ax, pivot_df, title, mode="float", decimals=1, vmin=None, v
     return im
 
 
-def sanitize_name(name: str) -> str:
-    return (
-        name.replace(" ", "_")
-        .replace("/", "-")
-        .replace("=", "-")
-        .replace(",", "_")
-        .replace(".", "p")
-    )
-
-
 def build_dashboard_for_slice(
     df_slice: pd.DataFrame,
     x_col: str,
@@ -300,30 +201,20 @@ def build_dashboard_for_slice(
     csv_stem: str,
 ):
     """
-    Generate a multi-panel heatmap dashboard for one hyperparameter slice.
-
-    Each dashboard contains several heatmaps summarizing system performance
-    metrics across the selected hyperparameter grid.
-
-    Panels typically include:
-
-        • Probability of clearing the horizon
-        • Gurobi solve time
-        • Average total overtime
-        • Average nominal load per day
-        • Average robust load per day
-        • Average robustness buffer per job
-
-    The figure is automatically saved to the output directory with
-    hyperparameter values embedded in the filename.
+    Build one multi-panel dashboard for one hyperparameter slice.
     """
     metric_specs = [
-        ("prob_cleared_within_horizon", "Probability of Clearing Horizon", "percent", 1, 0.0, 1.0),
+        # Outcome layer
+        ("prob_cleared_within_extended_horizon", "Prob. Cleared in Extended Horizon", "percent", 0, 0.0, 1.0),
+        ("avg_total_weekend_cost", "Avg. Weekend Extension Cost", "float", 1, None, None),
+        ("avg_n_weekend_days_used", "Avg. Weekend Days Used", "float", 1, None, None),
+        ("avg_final_completion_day", "Avg. Final Completion Day", "float", 1, None, None),
+
+        # Diagnostics / planning layer
         ("solve_time_sec", "Gurobi Solve Time (sec)", "float", 0, None, None),
-        ("avg_total_overtime", "Average Total Overtime", "float", 1, None, None),
-        ("avg_nominal_load_per_day", "Average Nominal Load / Day", "float", 1, None, None),
-        ("avg_robust_load_per_day", "Average Robust Load / Day", "float", 1, None, None),
-        ("k_buffer_mean", "Average Robustness Buffer / Job", "float", 1, None, None),
+        ("avg_robust_load_per_day", "Avg. Robust Load / Weekday", "float", 1, None, None),
+        ("k_buffer_mean", "Avg. Robustness Buffer / Job", "float", 1, None, None),
+        ("prob_any_weekend_use", "Prob. Any Weekend Use", "percent", 0, 0.0, 1.0),
     ]
 
     existing_specs = [m for m in metric_specs if m[0] in df_slice.columns]
@@ -331,36 +222,35 @@ def build_dashboard_for_slice(
         return
 
     n_panels = len(existing_specs)
-    n_rows = 2
-    n_cols = int(np.ceil(n_panels / n_rows))
+    n_cols = 4
+    n_rows = int(np.ceil(n_panels / n_cols))
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4.8 * n_rows))
     axes = np.array(axes).reshape(-1)
 
-    ims = []
     for idx, (col, title, mode, decimals, vmin, vmax) in enumerate(existing_specs):
         pivot = make_pivot(df_slice, col, x_col, y_col)
         if pivot.empty:
             axes[idx].axis("off")
             continue
-        im = plot_one_heatmap(
+
+        plot_one_heatmap(
             axes[idx],
-            pivot,
+            pivot_df=pivot,
             title=title,
             mode=mode,
             decimals=decimals,
             vmin=vmin,
             vmax=vmax,
         )
-        ims.append((im, axes[idx], title))
 
     for idx in range(len(existing_specs), len(axes)):
         axes[idx].axis("off")
 
     fig.suptitle(
-        f"Heatmap Dashboard | {csv_stem} | slice: {slice_name}",
-        fontsize=14,
-        y=1.01
+        f"Weekend-Extension Heatmap Dashboard | {csv_stem} | slice: {slice_name}",
+        fontsize=15,
+        y=1.02,
     )
 
     plt.tight_layout()
@@ -372,33 +262,37 @@ def build_dashboard_for_slice(
     print(f"Saved: {out_path}")
 
 
+# =====================================================
+# 3. MAIN
+# =====================================================
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Automatically generate heatmap dashboards for all hyperparameter slices."
+        description="Generate heatmap dashboards for weekend-extension grid search results."
     )
     parser.add_argument(
         "--csv",
         type=str,
-        default="results/grid_search/grid_search_results.csv",
-        help="Path to grid search CSV."
+        default="results/grid_search/grid_search_results_weekend_extension.csv",
+        help="Path to weekend-extension grid search CSV.",
     )
     parser.add_argument(
         "--out-dir",
         type=str,
         default="results/figures",
-        help="Directory to save figures."
+        help="Directory to save output heatmaps.",
     )
     parser.add_argument(
         "--x-col",
         type=str,
         default=None,
-        help="Optional manual x-axis hyperparameter."
+        help="Optional manual x-axis hyperparameter.",
     )
     parser.add_argument(
         "--y-col",
         type=str,
         default=None,
-        help="Optional manual y-axis hyperparameter."
+        help="Optional manual y-axis hyperparameter.",
     )
     args = parser.parse_args()
 
@@ -409,7 +303,7 @@ def main():
     df = load_results(str(csv_path))
     varying = get_varying_hyperparams(df)
 
-    auto_x, auto_y, auto_facets = choose_axes(varying)
+    auto_x, auto_y, _ = choose_axes(varying)
     x_col = args.x_col if args.x_col else auto_x
     y_col = args.y_col if args.y_col else auto_y
 

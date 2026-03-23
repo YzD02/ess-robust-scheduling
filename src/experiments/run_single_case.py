@@ -1,20 +1,26 @@
+from __future__ import annotations
+
 """
 run_single_case.py
 ==================
 
-Run one complete end-to-end ESS robust scheduling experiment.
+Run one end-to-end ESS scheduling experiment under the following logic:
 
-Pipeline
---------
-1. Build one 4-week / 30-job planning instance
+1. Build one reusable instance (example: 50 jobs, 20 weekdays)
 2. Compute robust processing times using the shared model utility
-3. Solve the baseline Gurobi planning model
-4. Run one stochastic cross-day execution sample path
-5. Export a Gantt event-log CSV
+3. Solve the baseline Gurobi planning model on weekday bins only
+4. Run one stochastic execution sample path with:
+   - 20 weekday bins
+   - 8 weekend extension bins
+   - no same-day overtime completion
+5. Export event logs for Gantt chart visualization
 6. Run Monte Carlo summary validation
 
+Design principle
+----------------
+This script should reuse existing library functions as much as possible
+instead of re-implementing formulas or duplicated logic locally.
 """
-from __future__ import annotations
 
 from pathlib import Path
 import random
@@ -33,9 +39,9 @@ from src.simulation.simpy_cross_day_breakdown import (
 )
 
 
-# =================================================
-# 1. Base job profiles
-# =================================================
+# =====================================================
+# 1. BASE JOB PROFILES
+# =====================================================
 
 BASE_MU_A = {
     1: 88,  2: 80,  3: 96,  4: 84,  5: 92,
@@ -62,9 +68,9 @@ BASE_SIGMA_B = {
 }
 
 
-# =================================================
-# 2. Reusable instance builder
-# =================================================
+# =====================================================
+# 2. REUSABLE INSTANCE BUILDER
+# =====================================================
 
 def build_reusable_instance(
     *,
@@ -76,7 +82,7 @@ def build_reusable_instance(
     add_small_perturbation: bool = True,
 ) -> dict:
     """
-    Build a reusable planning instance by extending the base job profiles.
+    Build an instance by expanding the base job profiles.
 
     Logic
     -----
@@ -84,10 +90,9 @@ def build_reusable_instance(
         use the first n_jobs profiles
     - If n_jobs > number of base profiles:
         cycle through the base profiles repeatedly
-    - Optionally add small multiplicative perturbations so repeated jobs
-      are not perfectly identical
+    - Optional small perturbations make repeated jobs slightly different
 
-    This keeps run_single_case.py aligned with the grid-search philosophy.
+    This keeps single-case experiments aligned with the grid-search philosophy.
     """
     random.seed(seed)
 
@@ -128,25 +133,30 @@ def build_reusable_instance(
     }
 
 
-# =================================================
-# 3. Main experiment
-# =================================================
+# =====================================================
+# 3. MAIN
+# =====================================================
 
 def main():
     # -------------------------------------------------
     # A. Single-case experiment settings
     # -------------------------------------------------
-    # Here you can freely change n_jobs without rewriting all dictionaries.
+    # Change only these settings when you want to try another case.
     n_jobs = 50
-    n_days = 20
+    weekday_days = 20
 
     mu_scale = 1.0
     sigma_scale = 1.0
+    k = 1.0
+
     random_seed = 42
 
+    # -------------------------------------------------
+    # B. Build one reusable instance
+    # -------------------------------------------------
     instance = build_reusable_instance(
         n_jobs=n_jobs,
-        n_days=n_days,
+        n_days=weekday_days,
         mu_scale=mu_scale,
         sigma_scale=sigma_scale,
         seed=random_seed,
@@ -161,9 +171,9 @@ def main():
     sigma_B = instance["sigma_B"]
 
     # -------------------------------------------------
-    # B. Planning-layer parameters
+    # C. Planning-layer parameters
     # -------------------------------------------------
-    k = 1.0
+    # The planning model still uses weekday bins only.
     C_std = 480.0
     Cost_OT = 5.0
     Cost_fix = 180.0
@@ -179,11 +189,18 @@ def main():
     )
 
     # -------------------------------------------------
-    # C. Execution-layer parameters
+    # D. Execution-layer parameters
     # -------------------------------------------------
+    # New policy:
+    # - 20 weekdays
+    # - 8 weekend extension bins
+    # - no same-day overtime completion
     policy = SimulationPolicy(
         regular_shift=480.0,
-        max_overtime_per_day=120.0,
+        weekday_horizon_days=20,
+        weekend_extension_days=8,
+        weekend_fixed_cost=300.0,
+        weekend_variable_cost=8.0,
     )
 
     stop_cfg = MachineStopConfig(
@@ -193,7 +210,7 @@ def main():
     )
 
     # -------------------------------------------------
-    # D. Solve Gurobi baseline
+    # E. Solve weekday planning model
     # -------------------------------------------------
     gurobi_result = solve_gurobi_baseline(
         jobs=jobs,
@@ -222,13 +239,13 @@ def main():
 
     schedule = gurobi_result.sorted_schedule
 
-    print("\nPlanned schedule (post-processed order):")
+    print("\nPlanned weekday schedule (post-processed order):")
     for day in sorted(schedule.keys()):
         if schedule[day]:
             print(f"Day {day}: {schedule[day]}")
 
     # -------------------------------------------------
-    # E. One stochastic sample path
+    # F. Run one stochastic sample path
     # -------------------------------------------------
     one_run = simulate_horizon_with_backlog(
         schedule_dict=schedule,
@@ -244,15 +261,17 @@ def main():
     print_single_run_result(one_run)
 
     # -------------------------------------------------
-    # F. Export Gantt event log
+    # G. Export Gantt event log
     # -------------------------------------------------
     out_dir = Path("results/simulation_outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     gantt_df = event_log_to_dataframe(one_run.event_log)
+
+    # Add a convenient lane column for plotting/debugging
     gantt_df["lane"] = gantt_df.apply(
-        lambda r: f"Day {int(r['executed_day'])} - Station {r['station']}",
-        axis=1
+        lambda r: f"Day {int(r['executed_day'])} - {r['day_type']} - Station {r['station']}",
+        axis=1,
     )
 
     gantt_csv_path = out_dir / "gantt_events_single_run.csv"
@@ -260,21 +279,55 @@ def main():
     print(f"\nSaved Gantt event log to: {gantt_csv_path}")
 
     # -------------------------------------------------
-    # G. Day summary export
+    # H. Export day summary
     # -------------------------------------------------
+
     day_rows = []
     for day in sorted(one_run.days.keys()):
         d = one_run.days[day]
+
+        planned_nominal_load = sum(p_nominal[j] for j in d.planned_jobs) if d.planned_jobs else 0.0
+        planned_robust_load = sum(p_robust[j] for j in d.planned_jobs) if d.planned_jobs else 0.0
+
+        backlog_nominal_load = sum(p_nominal[j] for j in d.backlog_jobs_in) if d.backlog_jobs_in else 0.0
+        backlog_robust_load = sum(p_robust[j] for j in d.backlog_jobs_in) if d.backlog_jobs_in else 0.0
+
+        realized_executed_load = sum(
+            detail["total_time"] for detail in d.job_details.values()
+        ) if d.job_details else 0.0
+
+        capacity = policy.regular_shift
+        slack = capacity - realized_executed_load
+        overflow_flag = d.backlog_end_of_day > 0
+
         day_rows.append({
             "day": day,
+            "day_type": d.day_type,
+
             "planned_jobs": str(d.planned_jobs),
             "backlog_jobs_in": str(d.backlog_jobs_in),
             "realized_queue": str(d.realized_queue),
             "executed_sequence": str(d.executed_sequence),
             "unfinished_sequence": str(d.unfinished_sequence),
-            "used_time": d.used_time,
-            "overtime": d.overtime,
+
+            "planned_job_count": len(d.planned_jobs),
+            "backlog_in_count": len(d.backlog_jobs_in),
+            "executed_count": len(d.executed_sequence),
+            "unfinished_count": len(d.unfinished_sequence),
+
+            "planned_nominal_load": planned_nominal_load,
+            "planned_robust_load": planned_robust_load,
+            "backlog_nominal_load": backlog_nominal_load,
+            "backlog_robust_load": backlog_robust_load,
+            "realized_executed_load": realized_executed_load,
+
+            "capacity": capacity,
+            "slack": slack,
+            "utilization_ratio": realized_executed_load / capacity if capacity > 0 else None,
+            "overflow_flag": overflow_flag,
             "backlog_end_of_day": d.backlog_end_of_day,
+
+            "weekend_day_used": d.weekend_day_used,
         })
 
     day_summary_df = pd.DataFrame(day_rows)
@@ -283,7 +336,7 @@ def main():
     print(f"Saved day summary to: {day_summary_csv_path}")
 
     # -------------------------------------------------
-    # H. Monte Carlo summary
+    # I. Monte Carlo summary
     # -------------------------------------------------
     n_replications = 100
 
@@ -302,21 +355,26 @@ def main():
 
     summary_df = pd.DataFrame([{
         "n_jobs": len(jobs),
-        "n_days": len(days),
+        "weekday_days": weekday_days,
+        "weekend_extension_days": policy.weekend_extension_days,
         "mu_scale": mu_scale,
         "sigma_scale": sigma_scale,
         "k": k,
         "avg_nominal_job_time": sum(p_nominal.values()) / len(p_nominal),
         "avg_robust_job_time": sum(p_robust.values()) / len(p_robust),
-        "avg_total_overtime": summary["avg_total_overtime"],
-        "max_total_overtime": summary["max_total_overtime"],
-        "prob_terminal_backlog": summary["prob_terminal_backlog"],
-        "avg_terminal_backlog": summary["avg_terminal_backlog"],
+        "prob_cleared_within_weekdays": summary["prob_cleared_within_weekdays"],
+        "prob_cleared_within_extended_horizon": summary["prob_cleared_within_extended_horizon"],
+        "prob_terminal_backlog_after_extension": summary["prob_terminal_backlog_after_extension"],
+        "avg_terminal_backlog_after_extension": summary["avg_terminal_backlog_after_extension"],
         "avg_max_backlog": summary["avg_max_backlog"],
-        "prob_cleared_within_horizon": summary["prob_cleared_within_horizon"],
         "avg_n_spillover_days": summary["avg_n_spillover_days"],
         "prob_any_spillover": summary["prob_any_spillover"],
         "avg_first_spillover_day": summary["avg_first_spillover_day"],
+        "avg_n_weekend_days_used": summary["avg_n_weekend_days_used"],
+        "prob_any_weekend_use": summary["prob_any_weekend_use"],
+        "avg_weekend_used_time": summary["avg_weekend_used_time"],
+        "avg_total_weekend_cost": summary["avg_total_weekend_cost"],
+        "avg_final_completion_day": summary["avg_final_completion_day"],
     }])
 
     summary_csv_path = out_dir / "single_run_mc_summary.csv"

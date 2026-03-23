@@ -1,2 +1,2 @@
-n_jobs,n_days,mu_scale,sigma_scale,k,avg_nominal_job_time,avg_robust_job_time,avg_total_overtime,max_total_overtime,prob_terminal_backlog,avg_terminal_backlog,avg_max_backlog,prob_cleared_within_horizon,avg_n_spillover_days,prob_any_spillover,avg_first_spillover_day
-50,20,1.0,1.0,1.0,149.3225551340929,171.56605117204867,31.511220645866672,144.85955402807718,0.0,0,0,1.0,0,0.0,
+n_jobs,weekday_days,weekend_extension_days,mu_scale,sigma_scale,k,avg_nominal_job_time,avg_robust_job_time,prob_cleared_within_weekdays,prob_cleared_within_extended_horizon,prob_terminal_backlog_after_extension,avg_terminal_backlog_after_extension,avg_max_backlog,avg_n_spillover_days,prob_any_spillover,avg_first_spillover_day,avg_n_weekend_days_used,prob_any_weekend_use,avg_weekend_used_time,avg_total_weekend_cost,avg_final_completion_day
+50,20,8,1.0,1.0,1.0,149.3225551340929,171.56605117204867,0.46,1.0,0.0,0,1.46,7.53,0.8,7.2875,0.57,0.54,143.65065130869084,1320.2052104695267,20.57
