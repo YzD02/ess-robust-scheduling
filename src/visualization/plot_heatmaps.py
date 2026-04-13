@@ -4,130 +4,63 @@ from __future__ import annotations
 plot_heatmaps.py
 ================
 
-Heatmap dashboard for the weekend-extension grid search results.
+Heatmap dashboard for the grid search results.
 
-This script is tailored for the CSV produced by:
+What this script does
+---------------------
+Reads the grid search CSV produced by ``run_grid_search.py`` and generates
+a multi-panel heatmap dashboard showing how key performance metrics change
+across the (n_jobs × k) parameter space.
 
-    run_grid_search_weekend_extension.py
+Each panel in the dashboard shows one metric — for example, the probability
+of clearing all jobs within the extended horizon, or the average number of
+weekend days consumed.  Cells are colour-coded from low (dark) to high
+(bright), and the numeric value is printed inside each cell so the chart
+is self-contained.
 
-Main goals
+How to run
 ----------
-1. Show the operational performance of the new execution logic:
-   - 20 weekday bins
-   - 8 weekend extension bins
-   - no same-day overtime completion
-   - backlog-first execution
+    python -m src.visualization.plot_heatmaps
 
-2. Make the result interpretable by plotting both:
-   - outcome metrics
-   - parameter-scale metrics
+To point at a different CSV file:
+
+    python -m src.visualization.plot_heatmaps --csv path/to/results.csv
+
+Output
+------
+PNG figures saved to ``results/figures/``.
 
 Typical usage
 -------------
-python -m src.visualization.plot_heatmaps --csv results/grid_search/grid_search_results_weekend_extension.csv
+    python -m src.visualization.plot_heatmaps --csv results/grid_search/grid_search_results_weekend_extension.csv
 """
 
 import argparse
-from itertools import product
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.utils.plot_utils import (
+    load_results,
+    get_varying_hyperparams,
+    choose_axes,
+    iter_facet_slices,
+    sanitize_name,
+    unique_sorted,
+)
+
 
 HYPERPARAM_COLS = ["n_jobs", "mu_scale", "sigma_scale", "k"]
 
 
 # =====================================================
-# 1. HELPERS
+# 1. HEATMAP-SPECIFIC HELPERS
 # =====================================================
 
-def load_results(csv_path: str) -> pd.DataFrame:
-    """Load CSV and normalize boolean-like columns."""
-    df = pd.read_csv(csv_path)
-
-    bool_cols = ["accepted_for_simulation", "system_ok"]
-    for col in bool_cols:
-        if col in df.columns and df[col].dtype != bool:
-            mapped = (
-                df[col]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-                .map({"true": True, "false": False})
-            )
-            if mapped.notna().any():
-                df[col] = mapped
-
-    return df
-
-
-def get_varying_hyperparams(df: pd.DataFrame) -> list[str]:
-    """Return hyperparameter columns that actually vary in the CSV."""
-    varying = []
-    for col in HYPERPARAM_COLS:
-        if col in df.columns and df[col].nunique(dropna=True) > 1:
-            varying.append(col)
-    return varying
-
-
-def choose_axes(varying_params: list[str]) -> tuple[str, str | None, list[str]]:
-    """
-    Choose x-axis, y-axis, and facet columns automatically.
-
-    Priority
-    --------
-    - x-axis: n_jobs if available
-    - y-axis: k if available among remaining
-    - otherwise use the first remaining varying parameter
-    - the rest become facet/slice conditions
-    """
-    if not varying_params:
-        return "n_jobs", None, []
-
-    x_col = "n_jobs" if "n_jobs" in varying_params else varying_params[0]
-    remaining = [c for c in varying_params if c != x_col]
-
-    if not remaining:
-        return x_col, None, []
-
-    if "k" in remaining:
-        y_col = "k"
-    else:
-        y_col = remaining[0]
-
-    facet_cols = [c for c in remaining if c != y_col]
-    return x_col, y_col, facet_cols
-
-
-def unique_sorted(series: pd.Series):
-    return sorted(series.dropna().unique().tolist())
-
-
-def iter_facet_slices(df: pd.DataFrame, facet_cols: list[str]):
-    """
-    Yield all facet slices.
-
-    Example:
-    if facet_cols = [mu_scale, sigma_scale], then one slice is
-    mu_scale=1.0, sigma_scale=1.2
-    """
-    if not facet_cols:
-        yield "all", df.copy()
-        return
-
-    value_lists = [unique_sorted(df[c]) for c in facet_cols]
-    for combo in product(*value_lists):
-        sub = df.copy()
-        parts = []
-        for c, v in zip(facet_cols, combo):
-            sub = sub[np.isclose(sub[c], v)]
-            parts.append(f"{c}-{v}")
-        yield "__".join(parts), sub
-
-
 def make_pivot(df: pd.DataFrame, value_col: str, x_col: str, y_col: str) -> pd.DataFrame:
+    """Pivot a results DataFrame into a 2-D matrix for heatmap plotting."""
     pivot = df.pivot_table(
         index=y_col,
         columns=x_col,
@@ -137,7 +70,8 @@ def make_pivot(df: pd.DataFrame, value_col: str, x_col: str, y_col: str) -> pd.D
     return pivot.sort_index().sort_index(axis=1)
 
 
-def format_cell(val, mode="float", decimals=1) -> str:
+def format_cell(val, mode: str = "float", decimals: int = 1) -> str:
+    """Format a single heatmap cell value as a display string."""
     if pd.isna(val):
         return "NA"
     if mode == "percent":
@@ -145,16 +79,6 @@ def format_cell(val, mode="float", decimals=1) -> str:
     if mode == "int":
         return f"{int(round(val))}"
     return f"{val:.{decimals}f}"
-
-
-def sanitize_name(name: str) -> str:
-    return (
-        name.replace(" ", "_")
-        .replace("/", "-")
-        .replace("=", "-")
-        .replace(",", "_")
-        .replace(".", "p")
-    )
 
 
 # =====================================================

@@ -4,24 +4,50 @@ from __future__ import annotations
 plot_phase_diagram.py
 =====================
 
-Phase diagram for the weekend-extension grid search results.
+Phase diagram for the grid search results.
 
-This script classifies each case into:
+What this script does
+---------------------
+Reads the grid search CSV and produces a colour-coded grid where each cell
+represents one (n_jobs, k) combination and its colour shows which operational
+zone that combination falls into:
 
-0 = computationally infeasible
-1 = infeasible even after weekend extension
-2 = feasible only because weekend extension is used
-3 = feasible within weekdays
-4 = missing / not simulated
+  Green  — feasible within weekdays
+           The schedule clears with ≥ 95 % probability using regular shifts only.
 
-This is more informative than the old phase diagram because the new
-execution policy distinguishes between:
-- clearing within weekdays
-- clearing only after weekend recovery bins
+  Orange — feasible only with weekend extension
+           Weekdays alone are not enough, but the extra weekend recovery days
+           bring the success rate back up to ≥ 95 %.
+
+  Red-orange — infeasible even after extension
+               Even with full weekend support the schedule fails more than
+               5 % of the time.  The cell shows the actual success probability.
+
+  Red    — computationally infeasible
+           Gurobi could not produce a valid schedule within the time limit.
+
+  Grey   — missing / not yet simulated
+
+The cell label shows the most useful diagnostic value for each zone:
+  green       → "WD OK"
+  orange      → average weekend days used
+  red-orange  → success probability (e.g. "72%")
+  red         → Gurobi solve time
+
+How to run
+----------
+    python -m src.visualization.plot_phase_diagram
+
+To point at a different CSV:
+
+    python -m src.visualization.plot_phase_diagram --csv path/to/results.csv
+
+Output
+------
+PNG figures saved to ``results/figures/``.
 """
 
 import argparse
-from itertools import product
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -30,93 +56,17 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
+from src.utils.plot_utils import (
+    load_results,
+    get_varying_hyperparams,
+    choose_axes,
+    iter_facet_slices,
+    sanitize_name,
+    unique_sorted,
+)
+
 
 HYPERPARAM_COLS = ["n_jobs", "mu_scale", "sigma_scale", "k"]
-
-
-# =====================================================
-# 1. HELPERS
-# =====================================================
-
-def load_results(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
-
-    bool_cols = ["accepted_for_simulation", "system_ok"]
-    for col in bool_cols:
-        if col in df.columns and df[col].dtype != bool:
-            mapped = (
-                df[col]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-                .map({"true": True, "false": False})
-            )
-            if mapped.notna().any():
-                df[col] = mapped
-
-    return df
-
-
-def get_varying_hyperparams(df: pd.DataFrame) -> list[str]:
-    varying = []
-    for col in HYPERPARAM_COLS:
-        if col in df.columns and df[col].nunique(dropna=True) > 1:
-            varying.append(col)
-    return varying
-
-
-def choose_axes(varying_params: list[str]) -> tuple[str, str | None, list[str]]:
-    """
-    Prefer:
-    - x = n_jobs
-    - y = k if available
-    - otherwise y = next varying parameter
-    """
-    if not varying_params:
-        return "n_jobs", None, []
-
-    x_col = "n_jobs" if "n_jobs" in varying_params else varying_params[0]
-    remaining = [c for c in varying_params if c != x_col]
-
-    if not remaining:
-        return x_col, None, []
-
-    if "k" in remaining:
-        y_col = "k"
-    else:
-        y_col = remaining[0]
-
-    facet_cols = [c for c in remaining if c != y_col]
-    return x_col, y_col, facet_cols
-
-
-def unique_sorted(series: pd.Series):
-    return sorted(series.dropna().unique().tolist())
-
-
-def iter_facet_slices(df: pd.DataFrame, facet_cols: list[str]):
-    if not facet_cols:
-        yield "all", df.copy()
-        return
-
-    value_lists = [unique_sorted(df[c]) for c in facet_cols]
-    for combo in product(*value_lists):
-        sub = df.copy()
-        parts = []
-        for c, v in zip(facet_cols, combo):
-            sub = sub[np.isclose(sub[c], v)]
-            parts.append(f"{c}-{v}")
-        yield "__".join(parts), sub
-
-
-def sanitize_name(name: str) -> str:
-    return (
-        name.replace(" ", "_")
-        .replace("/", "-")
-        .replace("=", "-")
-        .replace(",", "_")
-        .replace(".", "p")
-    )
 
 
 # =====================================================
