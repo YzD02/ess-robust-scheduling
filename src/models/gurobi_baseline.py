@@ -1,46 +1,38 @@
 """Baseline robust bin-packing model solved with Gurobi.
 
-This file implements the planning layer discussed in the project.
-The model decides only *which day* each job is assigned to. Within-day sequence
-is recovered later by a simple post-processing rule, which is consistent with the
-advisor feedback discussed earlier.
+What this module does
+---------------------
+Uses the Gurobi mathematical optimisation solver to assign all jobs to working
+days, minimising overtime cost.
+
+Think of it as an intelligent bin-packing problem:
+  - Each job has a "planned processing time" (already inflated by the safety buffer)
+  - Each working day is a "bin" with 480 minutes of regular capacity
+  - If a day overflows, overtime can be added — but overtime costs money
+  - Goal: assign every job to exactly one day while minimising total overtime cost
+
+Output
+------
+  sorted_schedule   dict mapping day number → list of job ids assigned to that day,
+                    ordered by shortest-robust-time first within each day (this order
+                    is used by the simulation to sequence jobs within a day)
+  planned_total_ot  total planned overtime minutes across the full horizon
 
 Mathematical model
 ------------------
-Sets:
-    J = set of jobs
-    T = set of working days
-
 Decision variables:
-    z[j,t] = 1 if job j is assigned to day t, 0 otherwise
-    OT[t]  = overtime minutes used on day t
-    u[t]   = 1 if overtime is activated on day t, 0 otherwise
+  z[j, t]   binary — 1 if job j is assigned to day t, 0 otherwise
+  OT[t]     continuous — overtime minutes used on day t
+  u[t]      binary — 1 if overtime is activated on day t, 0 otherwise
 
 Objective:
-    minimize sum_t (Cost_fix * u[t] + Cost_OT * OT[t])
-
-Interpretation of the objective:
-- Cost_fix penalizes opening overtime on a day at all
-- Cost_OT penalizes the amount of overtime minutes used
-- Together, they encourage the model to use regular capacity first and use
-  overtime only when necessary
+  minimise  sum_t ( Cost_fix * u[t]  +  Cost_OT * OT[t] )
 
 Constraints:
-1) Full Assignment
-       sum_t z[j,t] = 1,  for all j
-   Every job must be assigned exactly once.
-
-2) Robust Daily Capacity
-       sum_j p_robust[j] * z[j,t] <= C_std + OT[t],  for all t
-   The total robust load in one day cannot exceed regular capacity plus
-   any overtime minutes assigned to that day.
-
-3) Overtime Activation Logic
-       OT[t] <= M * u[t],  for all t
-   If u[t] = 0, then OT[t] must be zero. If overtime is used, u[t] must be 1.
-
-This baseline is intentionally simple and appropriate for grid search because it
-keeps the computational burden low compared with the position-indexed extension.
+  1) Full assignment:  every job appears in exactly one day
+  2) Robust daily capacity:  sum of robust job times on day t <= C_std + OT[t]
+  3) Overtime activation:  OT[t] <= M * u[t]
+     (overtime can only be nonzero if the activation variable is switched on)
 """
 
 from __future__ import annotations

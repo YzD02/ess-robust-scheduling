@@ -1,24 +1,39 @@
 """Utilities for robust processing-time construction.
 
-This module is intentionally small and explicit because the robust processing time
-is the key bridge between the physical system and the planning model.
+What this module does
+---------------------
+Converts the raw statistical job parameters (mu, sigma) into a single
+*robust processing time* that the Gurobi planning model can use.
 
-Modeling idea
--------------
-For each job j, the planning model does not use a deterministic nominal time only.
-Instead, it inflates the nominal time with a safety buffer:
+The core formula
+----------------
+For each job j:
 
-    p'_j = (mu_A_j + mu_B_j) + k * sqrt(sigma_A_j^2 + sigma_B_j^2)
+    p_robust[j] = (mu_A[j] + mu_B[j])  +  k * sqrt(sigma_A[j]^2 + sigma_B[j]^2)
 
-where:
-- mu_A_j = mean processing time at Station A
-- mu_B_j = mean processing time at Station B
-- sigma_A_j = machine-side uncertainty at Station A
-- sigma_B_j = human-side uncertainty at Station B
-- k = robustness factor
+In plain language:
 
-The purpose of this transformation is to convert a stochastic job into a
-single robust item that can be packed into a daily capacity bin.
+    planned time = average total time  +  (k × combined uncertainty margin)
+
+Why add a buffer?
+-----------------
+If we schedule based on average times alone, roughly half of all days will
+overrun — because on bad days the actual times exceed the average.  Those
+overruns accumulate as backlog and spill into the following days.
+
+By inflating each job's planned time by k standard deviations, we give the
+schedule a built-in cushion.  The larger k is, the safer the plan, but also
+the more conservative (fewer jobs fit in one day).
+
+What k controls
+---------------
+  k = 0.0  →  no buffer; plan uses average times only (highest risk)
+  k = 0.5  →  moderate buffer; good starting point for low-variability lines
+  k = 1.0  →  one standard deviation of margin (commonly used default)
+  k = 2.0  →  very conservative; appropriate for high-variability operations
+
+This module returns both the nominal time (no buffer) and the robust time
+(with buffer) so that downstream analysis can compare them side by side.
 """
 
 from __future__ import annotations
@@ -37,23 +52,28 @@ def compute_robust_processing_times(
     sigma_B: NumericDict,
     k: float,
 ) -> tuple[NumericDict, NumericDict]:
-    """Compute nominal and robust processing times for all jobs.
+    """Compute nominal and robust processing times for every job.
 
     Parameters
     ----------
-    mu_A, mu_B:
-        Mean processing times for Stations A and B.
-    sigma_A, sigma_B:
-        Standard deviation terms representing uncertainty at Stations A and B.
-    k:
-        Robustness tuning factor.
+    mu_A, mu_B :
+        Mean processing times (minutes) at Stations A and B respectively.
+        Keyed by job id.
+    sigma_A, sigma_B :
+        Standard deviations of processing time at each station.
+        sigma_A captures machine-side uncertainty; sigma_B captures
+        human-side uncertainty.
+    k :
+        Robustness factor — see module docstring for guidance on choosing k.
 
     Returns
     -------
-    p_nominal:
-        Nominal total job duration mu_A + mu_B.
-    p_robust:
-        Robust job duration after adding the uncertainty buffer.
+    p_nominal :
+        Simple sum mu_A + mu_B.  Used for reporting and comparison only;
+        it is NOT passed to Gurobi.
+    p_robust :
+        Buffered time = p_nominal + k * sqrt(sigma_A^2 + sigma_B^2).
+        This is what the Gurobi model uses to pack jobs into daily bins.
     """
     jobs = sorted(mu_A.keys())
     p_nominal: NumericDict = {}
