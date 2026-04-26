@@ -1,2 +1,2 @@
 n_jobs,weekday_days,weekend_extension_days,maintenance_duration,mu_scale,sigma_scale,k,avg_nominal_job_time,avg_robust_job_time,prob_cleared_within_weekdays,prob_cleared_within_extended_horizon,prob_terminal_backlog_after_extension,avg_terminal_backlog_after_extension,avg_max_backlog,avg_n_spillover_days,prob_any_spillover,avg_first_spillover_day,avg_n_weekend_days_used,prob_any_weekend_use,avg_weekend_used_time,avg_total_weekend_cost,avg_final_completion_day
-50,20,8,120.0,1.0,1.0,1.0,150.9006872177917,174.2508613986112,0.0,1.0,0.0,0,6.06,19.09,1.0,2.18,2.73,1.0,951.0882730745068,8427.706184596054,22.73
+50,20,8,120.0,1.0,1.0,1.0,150.9006872177917,174.2508613986112,0.03,1.0,0.0,0,4.13,17.43,1.0,2.65,1.77,0.97,583.7416641902138,5200.93331352171,21.77

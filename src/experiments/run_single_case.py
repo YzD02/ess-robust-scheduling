@@ -89,11 +89,25 @@ def main():
         type=str,
         default=None,
         help=(
-            "Fixed maintenance schedule as 'day:start_min:end_min,...'. "
-            "Minutes are from shift start (0 = 08:00). "
-            "Example — Week1 Wed 12:00-14:00, Week2 Thu 08:00-10:00: '3:240:360,9:0:120'. "
-            "Pass 'random' to override DEFAULT_MAINTENANCE_SCHEDULE and use random windows. "
-            "If omitted, DEFAULT_MAINTENANCE_SCHEDULE defined in this file is used."
+            "Maintenance schedule mode. Options: "
+            "'random' = fully random per replication; "
+            "'candidates' = use DEFAULT_MAINTENANCE_CANDIDATE_DAYS; "
+            "'day:s:e,...' = fixed schedule e.g. '3:240:360,9:0:120'; "
+            "'week:days;...' = constrained-random e.g. '1:4,5;2:1,2,3'. "
+            "If omitted, uses DEFAULT_MAINTENANCE_SCHEDULE or DEFAULT_MAINTENANCE_CANDIDATE_DAYS "
+            "from src/utils/maintenance.py."
+        ),
+    )
+    parser.add_argument(
+        "--unscheduled",
+        type=str,
+        default=None,
+        choices=["random", "skip"],
+        help=(
+            "What to do with weeks not listed in a constrained-random schedule. "
+            "'random' = schedule maintenance on a random day (original behaviour); "
+            "'skip' = no maintenance window for that week. "
+            "If omitted, uses DEFAULT_UNSCHEDULED_WEEKS_POLICY from src/utils/maintenance.py."
         ),
     )
     args = parser.parse_args()
@@ -106,11 +120,15 @@ def main():
     random_seed  = args.seed
 
     # ---- Resolve maintenance schedule ----
-    maintenance_map = resolve_maintenance_map(args.maintenance)
+    maintenance_map, candidate_days, unscheduled_weeks_policy = resolve_maintenance_map(
+        args.maintenance, unscheduled_override=args.unscheduled
+    )
     if maintenance_map is not None:
         print(f"Maintenance schedule (fixed): {maintenance_map}")
+    elif candidate_days is not None:
+        print(f"Maintenance schedule (constrained-random, unscheduled={unscheduled_weeks_policy}): {candidate_days}")
     else:
-        print("Maintenance schedule: random (generated per replication from seed).")
+        print("Maintenance schedule: fully random (generated per replication from seed).")
 
     # Job generation config: these are assumption-based baseline values.
     # Replace with calibrated values once real production data is available.
@@ -215,6 +233,8 @@ def main():
         seed=42,
         simulation_run=1,
         maintenance_map=maintenance_map,
+        candidate_days=candidate_days,
+        unscheduled_weeks_policy=unscheduled_weeks_policy,
     )
     print_single_run_result(one_run)
 
@@ -293,6 +313,8 @@ def main():
         n_replications=n_replications,
         base_seed=42,
         maintenance_map=maintenance_map,
+        candidate_days=candidate_days,
+        unscheduled_weeks_policy=unscheduled_weeks_policy,
     )
     print_monte_carlo_summary(summary, n_replications)
 

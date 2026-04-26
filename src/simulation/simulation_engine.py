@@ -123,8 +123,56 @@ def generate_daily_maintenance_windows(
     maintenance_duration: float = 120.0,
     shift_length: float = 480.0,
     seed: int | None = None,
+    candidate_days: dict[int, list[int]] | None = None,
+    unscheduled_weeks_policy: str = 'random',
 ) -> dict[int, tuple[float, float]]:
-    """Generate one random maintenance window per 5-day work week."""
+    """Generate one random maintenance window per 5-day work week.
+
+    Parameters
+    ----------
+    candidate_days :
+        Optional dict mapping week number (1-based) to a list of allowed
+        day-of-week positions within that week (1=Mon, 2=Tue, …, 5=Fri).
+
+        Examples::
+
+            # Week 1 can only fall on Thu or Fri;
+            # Week 2 can only fall on Mon, Tue, or Wed;
+            # Weeks 3 and 4 are unconstrained (behaviour depends on
+            # unscheduled_weeks_policy).
+            {1: [4, 5], 2: [1, 2, 3]}
+
+        Weeks not listed in the dict are handled according to
+        ``unscheduled_weeks_policy``.  If None (default), all weeks are
+        treated as unscheduled.
+
+    unscheduled_weeks_policy :
+        Controls what happens to weeks that are not listed in
+        ``candidate_days``:
+
+        ``'random'`` (default)
+            A maintenance window is scheduled on a randomly chosen day
+            from the full 5-day week.  This reproduces the original
+            behaviour and is also the fallback when ``candidate_days``
+            is None.
+
+        ``'skip'``
+            No maintenance window is scheduled for that week.  Use this
+            when you only want maintenance in specific weeks and the
+            remaining weeks should be maintenance-free.
+
+    Notes
+    -----
+    The start time within the chosen day is always drawn uniformly at
+    random from [0, shift_length - maintenance_duration], regardless of
+    which policy is active.
+    """
+    if unscheduled_weeks_policy not in ('random', 'skip'):
+        raise ValueError(
+            f"unscheduled_weeks_policy must be 'random' or 'skip', "
+            f"got '{unscheduled_weeks_policy}'."
+        )
+
     if seed is not None:
         rng = random.Random(seed + 100_000)
     else:
@@ -132,12 +180,35 @@ def generate_daily_maintenance_windows(
 
     maintenance_map: dict[int, tuple[float, float]] = {}
     n_weeks = weekday_horizon_days // 5
+
     for w in range(n_weeks):
-        week_days = list(range(w * 5 + 1, w * 5 + 6))
-        chosen_day = rng.choice(week_days)
-        start = rng.uniform(0.0, shift_length - maintenance_duration)
-        end = start + maintenance_duration
-        maintenance_map[chosen_day] = (start, end)
+        week_number = w + 1  # 1-based week index for candidate_days lookup
+        all_week_days = list(range(w * 5 + 1, w * 5 + 6))  # absolute day numbers
+
+        if candidate_days is not None and week_number in candidate_days:
+            # This week has explicit candidate days — pick randomly from them.
+            allowed_positions = candidate_days[week_number]
+            eligible_days = [w * 5 + pos for pos in allowed_positions]
+            # Safety: keep only days that actually fall within this week.
+            eligible_days = [d for d in eligible_days if d in all_week_days]
+            if not eligible_days:
+                eligible_days = all_week_days
+            chosen_day = rng.choice(eligible_days)
+            start = rng.uniform(0.0, shift_length - maintenance_duration)
+            maintenance_map[chosen_day] = (start, start + maintenance_duration)
+
+        elif unscheduled_weeks_policy == 'skip':
+            # Week not listed in candidate_days and policy is skip —
+            # no maintenance window this week.
+            pass
+
+        else:
+            # unscheduled_weeks_policy == 'random': fall back to any day
+            # in the full week (original behaviour).
+            chosen_day = rng.choice(all_week_days)
+            start = rng.uniform(0.0, shift_length - maintenance_duration)
+            maintenance_map[chosen_day] = (start, start + maintenance_duration)
+
     return maintenance_map
 
 
@@ -380,6 +451,8 @@ def simulate_horizon_with_backlog(
     seed: int | None = None,
     simulation_run: int = 1,
     maintenance_map: dict | None = None,
+    candidate_days: dict | None = None,
+    unscheduled_weeks_policy: str = 'random',
 ) -> HorizonExecutionResult:
     """Simulate one complete sample path across the full planning horizon.
 
@@ -402,15 +475,32 @@ def simulate_horizon_with_backlog(
     simulation_run :
         Run index (1-based).  Stored in the event log for identification.
     maintenance_map :
-        Optional pre-built maintenance schedule mapping day index →
-        (start_minute, end_minute).  If provided, this overrides random
-        generation entirely — the same fixed windows are used in every
-        replication.  If None (default), windows are generated randomly
-        using the seed.
+        Optional fully pre-built maintenance schedule mapping day index →
+        (start_minute, end_minute).  If provided, this overrides both random
+        generation and ``candidate_days`` — the same fixed windows are used
+        in every replication.  If None (default), windows are generated
+        randomly using the seed (optionally constrained by ``candidate_days``).
 
         Example (Week 1 Wednesday 12:00-14:00, Week 2 Thursday 08:00-10:00,
-        assuming an 08:00 shift start):
+        assuming an 08:00 shift start)::
+
             {3: (240, 360), 9: (0, 120)}
+
+    candidate_days :
+        Optional per-week constraint on which days maintenance may fall.
+        Maps week number (1-based) to a list of allowed day-of-week positions
+        (1=Mon … 5=Fri).  The start time within that day is still random.
+        Ignored if ``maintenance_map`` is provided.
+
+        Example — Week 1 only Thu/Fri, Week 2 only Mon/Tue/Wed::
+
+            {1: [4, 5], 2: [1, 2, 3]}
+
+    unscheduled_weeks_policy :
+        Controls weeks not listed in ``candidate_days``.
+        ``'random'`` (default) schedules maintenance on a random day;
+        ``'skip'`` leaves those weeks maintenance-free.
+        Ignored if ``maintenance_map`` is provided.
     """
     if seed is not None:
         random.seed(seed)
@@ -421,7 +511,8 @@ def simulate_horizon_with_backlog(
     planned_day_map: Dict[int, int] = {j: day for day, jobs in schedule_dict.items() for j in jobs}
 
     # Use the caller-supplied maintenance map if provided; otherwise generate
-    # one random window per work week from the seed.
+    # one random window per work week from the seed, optionally constrained
+    # to specific candidate days per week.
     if maintenance_map is not None:
         _maintenance_map = maintenance_map
     else:
@@ -431,6 +522,8 @@ def simulate_horizon_with_backlog(
             maintenance_duration=policy.maintenance_duration,
             shift_length=policy.regular_shift,
             seed=seed,
+            candidate_days=candidate_days,
+            unscheduled_weeks_policy=unscheduled_weeks_policy,
         )
 
     backlog: List[int] = []         # jobs not finished on their scheduled day
@@ -544,6 +637,8 @@ def monte_carlo_breakdown_analysis(
     n_replications: int = 200,
     base_seed: int = 42,
     maintenance_map: dict | None = None,
+    candidate_days: dict | None = None,
+    unscheduled_weeks_policy: str = 'random',
 ) -> Dict[str, Any]:
     """Run many independent simulations and aggregate the results.
 
@@ -570,6 +665,14 @@ def monte_carlo_breakdown_analysis(
         Optional fixed maintenance schedule (see ``simulate_horizon_with_backlog``
         for format).  If provided, the same windows are used in every replication.
         If None, each replication generates its own random windows from its seed.
+    candidate_days :
+        Optional per-week constraint on which days maintenance may fall
+        (see ``simulate_horizon_with_backlog`` for format).
+        Ignored if ``maintenance_map`` is provided.
+    unscheduled_weeks_policy :
+        Controls weeks not listed in ``candidate_days``.
+        ``'random'`` (default) or ``'skip'``.
+        Ignored if ``maintenance_map`` is provided.
     """
     terminal_backlog_list: List[int] = []
     max_backlog_list: List[int] = []
@@ -594,6 +697,8 @@ def monte_carlo_breakdown_analysis(
             seed=base_seed + r,
             simulation_run=r + 1,
             maintenance_map=maintenance_map,
+            candidate_days=candidate_days,
+            unscheduled_weeks_policy=unscheduled_weeks_policy,
         )
         terminal_backlog_list.append(out.terminal_backlog_count)
         max_backlog_list.append(out.max_backlog)

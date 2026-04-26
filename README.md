@@ -143,26 +143,59 @@ up first if you want to keep the previous results.
 
 ### Controlling the maintenance schedule
 
-Both experiment scripts support the same `--maintenance` flag and share the
-same default schedule defined in `src/utils/maintenance.py`.
+Both experiment scripts support the same `--maintenance` and `--unscheduled`
+flags, and share the same defaults defined in `src/utils/maintenance.py`.
+There are three modes:
 
-**Default behaviour (no flag needed)**
-
-Both scripts automatically use the fixed schedule in `DEFAULT_MAINTENANCE_SCHEDULE`
-inside `src/utils/maintenance.py`.  Edit that file to change the project-wide
-default — one edit applies to both scripts at once.
-
-**Override from the command line**
-
-Pass a custom schedule as `day:start_minute:end_minute` entries separated by
-commas.  Minutes are measured from the start of the shift (minute 0 = 08:00
-if the shift starts at 08:00):
+**Mode 1 — Fixed schedule** (exact day and time predetermined)
 
 ```bash
 # Week 1 Wednesday 12:00-14:00  and  Week 2 Thursday 08:00-10:00
-python -m src.experiments.run_single_case --n-jobs 60 --maintenance "3:240:360,9:0:120"
+python -m src.experiments.run_single_case --maintenance "3:240:360,9:0:120"
 python -m src.experiments.run_grid_search --maintenance "3:240:360,9:0:120"
 ```
+
+The same windows are used in every Monte Carlo replication.
+
+**Mode 2 — Constrained-random schedule** (day constrained per week, time random)
+
+Specify which days each week's maintenance is allowed to fall on.  The exact
+day within those candidates and the start time are drawn randomly each
+replication.  Use `--unscheduled` to control what happens to weeks not listed:
+
+```bash
+# Week 1 only Thu/Fri, Week 2 only Mon-Wed; unscheduled weeks get no maintenance
+python -m src.experiments.run_single_case --maintenance "1:4,5;2:1,2,3" --unscheduled skip
+
+# Same candidates, but unscheduled weeks fall back to a random day
+python -m src.experiments.run_single_case --maintenance "1:4,5;2:1,2,3" --unscheduled random
+```
+
+If `--unscheduled` is omitted, `DEFAULT_UNSCHEDULED_WEEKS_POLICY` in
+`src/utils/maintenance.py` is used (currently `'skip'`).
+
+To use the default candidate days without typing them out:
+
+```bash
+python -m src.experiments.run_single_case --maintenance candidates
+python -m src.experiments.run_single_case --maintenance candidates --unscheduled random
+```
+
+**Mode 3 — Fully random** (original behaviour)
+
+```bash
+python -m src.experiments.run_single_case --maintenance random
+```
+
+**Changing the project-wide defaults**
+
+Edit `src/utils/maintenance.py` — one change applies to both scripts:
+
+| Constant | Controls |
+|---|---|
+| `DEFAULT_MAINTENANCE_SCHEDULE` | Fixed schedule (set to `None` to disable) |
+| `DEFAULT_MAINTENANCE_CANDIDATE_DAYS` | Constrained-random candidate days |
+| `DEFAULT_UNSCHEDULED_WEEKS_POLICY` | Fallback for unlisted weeks (`'skip'` or `'random'`) |
 
 **Time conversion reference** (08:00 shift start):
 
@@ -181,16 +214,6 @@ python -m src.experiments.run_grid_search --maintenance "3:240:360,9:0:120"
 | Week 2 | 6 | 7 | 8 | 9 | 10 |
 | Week 3 | 11 | 12 | 13 | 14 | 15 |
 | Week 4 | 16 | 17 | 18 | 19 | 20 |
-
-**Revert to random windows**
-
-Pass `random` to bypass the default and let each replication generate its
-own random maintenance windows from its seed:
-
-```bash
-python -m src.experiments.run_single_case --maintenance random
-python -m src.experiments.run_grid_search --maintenance random
-```
 
 ---
 

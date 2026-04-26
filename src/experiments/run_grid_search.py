@@ -114,7 +114,8 @@ def summarize_instance_parameters(*, mu_A, mu_B, sigma_A, sigma_B, p_nominal, p_
 def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_seed,
                       weekday_days, weekend_extension_days, C_std, Cost_OT, Cost_fix, M,
                       gurobi_time_limit_sec, weekend_fixed_cost, weekend_variable_cost,
-                      maintenance_map=None, output_flag=0):
+                      maintenance_map=None, candidate_days=None,
+                      unscheduled_weeks_policy='random', output_flag=0):
     gen_cfg = JobGenerationConfig(
         mu_A_mean=90.0, mu_A_std=6.0,
         mu_B_mean=60.0, mu_B_std=5.0,
@@ -224,6 +225,8 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         n_replications=replications,
         base_seed=random_seed,
         maintenance_map=maintenance_map,
+        candidate_days=candidate_days,
+        unscheduled_weeks_policy=unscheduled_weeks_policy,
     )
     row.update({
         'prob_cleared_within_weekdays': summary['prob_cleared_within_weekdays'],
@@ -262,10 +265,21 @@ def main():
     parser.add_argument(
         '--maintenance', type=str, default=None,
         help=(
-            "Fixed maintenance schedule as 'day:start_min:end_min,...'. "
-            "Same windows are used for every case in the grid. "
-            "Pass 'random' to use random windows (overrides DEFAULT_MAINTENANCE_SCHEDULE). "
-            "If omitted, DEFAULT_MAINTENANCE_SCHEDULE from src/utils/maintenance.py is used."
+            "Maintenance schedule mode. Options: "
+            "'random' = fully random; "
+            "'candidates' = use DEFAULT_MAINTENANCE_CANDIDATE_DAYS; "
+            "'day:s:e,...' = fixed schedule; "
+            "'week:days;...' = constrained-random e.g. '1:4,5;2:1,2,3'. "
+            "If omitted, uses defaults from src/utils/maintenance.py."
+        ),
+    )
+    parser.add_argument(
+        '--unscheduled', type=str, default=None,
+        choices=['random', 'skip'],
+        help=(
+            "What to do with weeks not listed in a constrained-random schedule. "
+            "'random' = schedule on a random day; 'skip' = no maintenance that week. "
+            "If omitted, uses DEFAULT_UNSCHEDULED_WEEKS_POLICY from src/utils/maintenance.py."
         ),
     )
     args = parser.parse_args()
@@ -275,7 +289,9 @@ def main():
     sigma_scales = parse_float_list(args.sigma_scales)
     k_values = parse_float_list(args.k_values)
 
-    maintenance_map = resolve_maintenance_map(args.maintenance)
+    maintenance_map, candidate_days, unscheduled_weeks_policy = resolve_maintenance_map(
+        args.maintenance, unscheduled_override=args.unscheduled
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,8 +304,10 @@ def main():
     print(f'Total cases: {total_cases}')
     if maintenance_map is not None:
         print(f'Maintenance schedule (fixed): {maintenance_map}')
+    elif candidate_days is not None:
+        print(f'Maintenance schedule (constrained-random, unscheduled={unscheduled_weeks_policy}): {candidate_days}')
     else:
-        print('Maintenance schedule: random (generated per replication from seed).')
+        print('Maintenance schedule: fully random (generated per replication from seed).')
 
     for n_jobs in n_values:
         for mu_scale in mu_scales:
@@ -314,6 +332,8 @@ def main():
                         weekend_fixed_cost=args.weekend_fixed_cost,
                         weekend_variable_cost=args.weekend_variable_cost,
                         maintenance_map=maintenance_map,
+                        candidate_days=candidate_days,
+                        unscheduled_weeks_policy=unscheduled_weeks_policy,
                         output_flag=args.output_flag,
                     )
                     rows.append(row)
