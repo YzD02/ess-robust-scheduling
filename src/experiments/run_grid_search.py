@@ -78,6 +78,12 @@ def parse_int_list(text: str) -> list[int]:
 
 
 def summarize_instance_parameters(*, mu_A, mu_B, sigma_A, sigma_B, p_nominal, p_robust, k, weekday_days, C_std):
+    """Summarise planning-layer instance parameters for the results CSV.
+
+    Note: sigma_B here is derived analytically from the triangular distribution
+    parameters (low_B, high_B, mu_B) in job_generation.py, not sampled directly.
+    It is used only in the planning buffer calculation, not in simulation.
+    """
     import math
     import statistics
     mu_total_vals = [mu_A[j] + mu_B[j] for j in mu_A]
@@ -120,7 +126,8 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         mu_A_mean=90.0, mu_A_std=6.0,
         mu_B_mean=60.0, mu_B_std=5.0,
         sigma_A_mean=14.0, sigma_A_std=2.0,
-        sigma_B_mean=18.0, sigma_B_std=2.5,
+        low_B_fraction=0.70,
+        high_B_fraction=1.50,
     )
     generated = generate_job_parameters(
         n_jobs=n_jobs,
@@ -129,12 +136,14 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         seed=random_seed,
         config=gen_cfg,
     )
-    jobs = generated['jobs']
-    days = list(range(1, weekday_days + 1))
-    mu_A = generated['mu_A']
-    mu_B = generated['mu_B']
+    jobs   = generated['jobs']
+    days   = list(range(1, weekday_days + 1))
+    mu_A   = generated['mu_A']
+    mu_B   = generated['mu_B']
+    low_B  = generated['low_B']
+    high_B = generated['high_B']
     sigma_A = generated['sigma_A']
-    sigma_B = generated['sigma_B']
+    sigma_B = generated['sigma_B']  # derived from triangular params; used in planning layer only
 
     p_nominal, p_robust = compute_robust_processing_times(
         mu_A=mu_A, mu_B=mu_B, sigma_A=sigma_A, sigma_B=sigma_B, k=k
@@ -219,7 +228,8 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         schedule_dict=gurobi_result.sorted_schedule,
         mu_A=mu_A,
         mu_B=mu_B,
-        sigma_B=sigma_B,
+        low_B=low_B,
+        high_B=high_B,
         policy=policy,
         stop_cfg=stop_cfg,
         n_replications=replications,

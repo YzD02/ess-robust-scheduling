@@ -132,15 +132,19 @@ def main():
 
     # Job generation config: these are assumption-based baseline values.
     # Replace with calibrated values once real production data is available.
+    # Station B now uses a triangular distribution: low_B_fraction and
+    # high_B_fraction define the best-case and worst-case multipliers on
+    # the mode (mu_B).  For example, 0.70 means the minimum time is 70%
+    # of the mode; 1.50 means the maximum is 150% of the mode.
     gen_cfg = JobGenerationConfig(
-        mu_A_mean=90.0,   # average Station A time per job (minutes)
-        mu_A_std=6.0,     # job-to-job spread in Station A times
-        mu_B_mean=60.0,   # average Station B time per job (minutes)
-        mu_B_std=5.0,     # job-to-job spread in Station B times
-        sigma_A_mean=14.0, # average within-job uncertainty at Station A
+        mu_A_mean=90.0,          # average Station A time per job (minutes)
+        mu_A_std=6.0,            # job-to-job spread in Station A times
+        mu_B_mean=60.0,          # average Station B mode per job (minutes)
+        mu_B_std=5.0,            # job-to-job spread in the mode
+        sigma_A_mean=14.0,       # average within-job uncertainty at Station A
         sigma_A_std=2.0,
-        sigma_B_mean=18.0, # average within-job uncertainty at Station B
-        sigma_B_std=2.5,
+        low_B_fraction=0.70,     # best case  = mode × 0.70
+        high_B_fraction=1.50,    # worst case = mode × 1.50
     )
 
     generated = generate_job_parameters(
@@ -150,12 +154,14 @@ def main():
         seed=random_seed,
         config=gen_cfg,
     )
-    jobs = generated['jobs']
-    days = list(range(1, weekday_days + 1))
-    mu_A = generated['mu_A']
-    mu_B = generated['mu_B']
+    jobs   = generated['jobs']
+    days   = list(range(1, weekday_days + 1))
+    mu_A   = generated['mu_A']
+    mu_B   = generated['mu_B']
+    low_B  = generated['low_B']
+    high_B = generated['high_B']
     sigma_A = generated['sigma_A']
-    sigma_B = generated['sigma_B']
+    sigma_B = generated['sigma_B']  # derived from triangular params; used in planning layer only
 
     # Gurobi model parameters
     C_std = 480.0        # regular shift capacity per day (8 hours × 60 minutes)
@@ -227,7 +233,8 @@ def main():
         schedule_dict=schedule,
         mu_A=mu_A,
         mu_B=mu_B,
-        sigma_B=sigma_B,
+        low_B=low_B,
+        high_B=high_B,
         policy=policy,
         stop_cfg=stop_cfg,
         seed=42,
@@ -307,7 +314,8 @@ def main():
         schedule_dict=schedule,
         mu_A=mu_A,
         mu_B=mu_B,
-        sigma_B=sigma_B,
+        low_B=low_B,
+        high_B=high_B,
         policy=policy,
         stop_cfg=stop_cfg,
         n_replications=n_replications,

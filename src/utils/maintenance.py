@@ -234,6 +234,16 @@ def resolve_maintenance_map(
         return None, DEFAULT_MAINTENANCE_CANDIDATE_DAYS, base_policy
 
     if ';' in maintenance_arg:
+        # Semicolons always indicate candidate-days format.
+        return None, parse_candidate_days(maintenance_arg), base_policy
+
+    # Distinguish single-entry candidate-days ("1:3,4,5") from fixed schedule
+    # ("3:240:360") by counting colons in the first entry.
+    # candidate-days entry: "week:day,day,..."  → exactly 1 colon
+    # fixed schedule entry: "day:start:end"     → exactly 2 colons
+    first_entry = maintenance_arg.split(',')[0].strip()
+    if first_entry.count(':') == 1:
+        # Single-week candidate-days without a trailing semicolon.
         return None, parse_candidate_days(maintenance_arg), base_policy
 
     return parse_maintenance_schedule(maintenance_arg), None, 'random'

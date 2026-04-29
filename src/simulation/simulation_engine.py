@@ -102,8 +102,22 @@ class HorizonExecutionResult:
     event_log: List[Dict[str, Any]]
 
 
-def sample_positive_normal(mu: float, sigma: float) -> float:
-    return max(0.1, random.gauss(mu, sigma))
+def sample_triangular_B(low: float, high: float, mode: float) -> float:
+    """Sample an actual Station B processing time from a triangular distribution.
+
+    The triangular distribution is bounded by [low, high] with a peak at mode.
+    This is more realistic than a normal distribution for manual operations because:
+      - it is bounded (no negative times, no unrealistically long times)
+      - it is easy to calibrate from factory observations (min, max, most common)
+      - it naturally supports asymmetric variability (mode need not be centred)
+
+    Parameters
+    ----------
+    low  : shortest realistic processing time (best case)
+    high : longest  realistic processing time (worst case)
+    mode : most frequently observed processing time (peak of the triangle)
+    """
+    return random.triangular(low, high, mode)
 
 
 def sample_stop_duration(stop_cfg: MachineStopConfig) -> float:
@@ -267,13 +281,31 @@ def realize_station_A_time(*, job_id: int, mu_A: Dict[int, float], stop_cfg: Mac
     return actual_A_time, total_stop_delay, stop_count
 
 
-def realize_station_B_time(*, job_id: int, mu_B: Dict[int, float], sigma_B: Dict[int, float]) -> float:
-    return sample_positive_normal(mu_B[job_id], sigma_B[job_id])
+def realize_station_B_time(
+    *, job_id: int,
+    mu_B: Dict[int, float],
+    low_B: Dict[int, float],
+    high_B: Dict[int, float],
+) -> float:
+    """Sample actual Station B processing time from a triangular distribution.
+
+    mu_B  = mode (most likely time)
+    low_B = lower bound (best-case time)
+    high_B = upper bound (worst-case time)
+    """
+    return sample_triangular_B(low_B[job_id], high_B[job_id], mu_B[job_id])
 
 
-def realize_job_station_details(*, job_id: int, mu_A: Dict[int, float], mu_B: Dict[int, float], sigma_B: Dict[int, float], stop_cfg: MachineStopConfig) -> Dict[str, float | int]:
+def realize_job_station_details(
+    *, job_id: int,
+    mu_A: Dict[int, float],
+    mu_B: Dict[int, float],
+    low_B: Dict[int, float],
+    high_B: Dict[int, float],
+    stop_cfg: MachineStopConfig,
+) -> Dict[str, float | int]:
     actual_A_time, stop_delay, stop_count = realize_station_A_time(job_id=job_id, mu_A=mu_A, stop_cfg=stop_cfg)
-    actual_B_time = realize_station_B_time(job_id=job_id, mu_B=mu_B, sigma_B=sigma_B)
+    actual_B_time = realize_station_B_time(job_id=job_id, mu_B=mu_B, low_B=low_B, high_B=high_B)
     return {
         'actual_A_time': actual_A_time,
         'actual_B_time': actual_B_time,
@@ -293,7 +325,8 @@ def execute_one_day_with_backlog(
     planned_day_map: Dict[int, int],
     mu_A: Dict[int, float],
     mu_B: Dict[int, float],
-    sigma_B: Dict[int, float],
+    low_B: Dict[int, float],
+    high_B: Dict[int, float],
     stop_cfg: MachineStopConfig,
     maintenance_start_day: float | None = None,
     maintenance_end_day: float | None = None,
@@ -329,7 +362,8 @@ def execute_one_day_with_backlog(
             job_id=job_id,
             mu_A=mu_A,
             mu_B=mu_B,
-            sigma_B=sigma_B,
+            low_B=low_B,
+            high_B=high_B,
             stop_cfg=stop_cfg,
         )
         total_time = float(detail['total_time'])
@@ -445,7 +479,8 @@ def simulate_horizon_with_backlog(
     schedule_dict: Dict[int, List[int]],
     mu_A: Dict[int, float],
     mu_B: Dict[int, float],
-    sigma_B: Dict[int, float],
+    low_B: Dict[int, float],
+    high_B: Dict[int, float],
     policy: SimulationPolicy,
     stop_cfg: MachineStopConfig,
     seed: int | None = None,
@@ -546,7 +581,8 @@ def simulate_horizon_with_backlog(
             planned_day_map=planned_day_map,
             mu_A=mu_A,
             mu_B=mu_B,
-            sigma_B=sigma_B,
+            low_B=low_B,
+            high_B=high_B,
             stop_cfg=stop_cfg,
             maintenance_start_day=m_window[0],
             maintenance_end_day=m_window[1],
@@ -578,7 +614,8 @@ def simulate_horizon_with_backlog(
             planned_day_map=planned_day_map,
             mu_A=mu_A,
             mu_B=mu_B,
-            sigma_B=sigma_B,
+            low_B=low_B,
+            high_B=high_B,
             stop_cfg=stop_cfg,
             maintenance_start_day=None,
             maintenance_end_day=None,
@@ -631,7 +668,8 @@ def monte_carlo_breakdown_analysis(
     schedule_dict: Dict[int, List[int]],
     mu_A: Dict[int, float],
     mu_B: Dict[int, float],
-    sigma_B: Dict[int, float],
+    low_B: Dict[int, float],
+    high_B: Dict[int, float],
     policy: SimulationPolicy,
     stop_cfg: MachineStopConfig,
     n_replications: int = 200,
@@ -674,6 +712,29 @@ def monte_carlo_breakdown_analysis(
         ``'random'`` (default) or ``'skip'``.
         Ignored if ``maintenance_map`` is provided.
     """
+    # Pre-draw one fixed maintenance map for all replications when using
+    # constrained-random mode.  This ensures the maintenance schedule is
+    # identical across all replications so that results are comparable —
+    # the only source of variability between runs is job processing times
+    # and machine stops, not when maintenance happens.
+    #
+    # If a fully pre-built maintenance_map was supplied by the caller, that
+    # takes priority and is used as-is (already fixed).
+    # If no maintenance constraints are set, each replication generates its
+    # own windows from its own seed (original random behaviour).
+    if maintenance_map is None and candidate_days is not None:
+        fixed_maintenance_map = generate_daily_maintenance_windows(
+            weekday_horizon_days=policy.weekday_horizon_days,
+            weekend_extension_days=policy.weekend_extension_days,
+            maintenance_duration=policy.maintenance_duration,
+            shift_length=policy.regular_shift,
+            seed=base_seed,
+            candidate_days=candidate_days,
+            unscheduled_weeks_policy=unscheduled_weeks_policy,
+        )
+    else:
+        fixed_maintenance_map = maintenance_map  # None → random per-replication
+
     terminal_backlog_list: List[int] = []
     max_backlog_list: List[int] = []
     cleared_weekdays_flags: List[bool] = []
@@ -691,14 +752,15 @@ def monte_carlo_breakdown_analysis(
             schedule_dict=schedule_dict,
             mu_A=mu_A,
             mu_B=mu_B,
-            sigma_B=sigma_B,
+            low_B=low_B,
+            high_B=high_B,
             policy=policy,
             stop_cfg=stop_cfg,
             seed=base_seed + r,
             simulation_run=r + 1,
-            maintenance_map=maintenance_map,
-            candidate_days=candidate_days,
-            unscheduled_weeks_policy=unscheduled_weeks_policy,
+            maintenance_map=fixed_maintenance_map,
+            candidate_days=None,
+            unscheduled_weeks_policy='random',
         )
         terminal_backlog_list.append(out.terminal_backlog_count)
         max_backlog_list.append(out.max_backlog)

@@ -37,7 +37,7 @@ The model covers Stage 2 of the ESS line — two sequential stations:
 | Station | Operation | Uncertainty source |
 |---|---|---|
 | **A** | Automated Busbar Assembly | Machine micro-stops (random frequency and duration) |
-| **B** | Manual Harness Alignment & Riveting | Worker speed variability (modelled as Gaussian) |
+| **B** | Manual Harness Alignment & Riveting | Worker speed variability (triangular distribution: min, mode, max) |
 
 Each working day has **480 minutes** of regular capacity (one 8-hour shift).
 No same-day overtime is allowed.  Unfinished jobs carry over to the next day
@@ -110,7 +110,24 @@ Expected output files in `results/simulation_outputs/`:
 
 To change the parameters (number of jobs, k value, random seed), open
 `src/experiments/run_single_case.py` and edit the variables at the top of
-the `main()` function.
+the `main()` function.  Or pass them directly on the command line:
+
+```bash
+python -m src.experiments.run_single_case --n-jobs 60 --k 1.0 --seed 42
+```
+
+**Available CLI flags for `run_single_case`:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--n-jobs` | 50 | Number of jobs to schedule |
+| `--k` | 1.0 | Robustness buffer factor (0 = no buffer, 2 = very conservative) |
+| `--mu-scale` | 1.0 | Multiplier for all mean job times |
+| `--sigma-scale` | 1.0 | Multiplier for all standard deviations |
+| `--seed` | 42 | Random seed |
+| `--replications` | 100 | Number of Monte Carlo replications |
+| `--maintenance` | — | Maintenance schedule (see section below) |
+| `--unscheduled` | — | Policy for unlisted weeks: `skip` or `random` |
 
 ---
 
@@ -273,12 +290,41 @@ creating backlog.  Larger k = safer but fewer jobs fit per day.
 - **Station A** (automated):  variability comes from random machine micro-stops.
   The simulation models these explicitly — inter-stop times are exponentially
   distributed, stop durations are gamma-distributed.
-- **Station B** (manual):  variability comes from human factors, which are
-  well approximated by a normal distribution centred on the mean job time.
+- **Station B** (manual):  variability comes from human factors.  The actual
+  processing time is drawn from a **triangular distribution** parameterised by
+  three values per job:
 
-`sigma_A` is therefore used only in the planning layer (to size the buffer)
-and is not passed into the simulation, where Station A randomness is already
-represented by the stop process.
+  | Parameter | Meaning | Default |
+  |---|---|---|
+  | `mode` (mu_B) | most likely processing time | ~60 min |
+  | `low_B` | best-case time = mode × `low_B_fraction` | mode × 0.70 |
+  | `high_B` | worst-case time = mode × `high_B_fraction` | mode × 1.50 |
+
+  The triangular distribution is preferred over Gaussian because it is bounded
+  (no negative times), directly interpretable from factory observations (record
+  the fastest, slowest, and most common job times), and naturally supports
+  asymmetric variability.
+
+  Once real factory data is available, calibrate by setting `low_B_fraction`,
+  `high_B_fraction`, and `mu_B_mean` in the `JobGenerationConfig` block inside
+  `run_single_case.py` and `run_grid_search.py`.
+
+`sigma_A` is used only in the planning layer (to size the k-buffer) and is not
+passed into the simulation, where Station A randomness is represented by the
+machine-stop process.  `sigma_B` is derived analytically from the triangular
+parameters and is also used only in the planning layer.
+
+### Why is the maintenance window fixed across all Monte Carlo replications?
+
+When using constrained-random maintenance mode, the maintenance windows are
+drawn **once before the simulation loop** using the base seed, and the same
+windows are reused in all 100 replications.  This ensures that the only source
+of variability between replications is job processing times and machine stops —
+not when maintenance happens.  This makes results across different parameter
+combinations (e.g. k = 0.5 vs k = 1.0) directly comparable.
+
+If you want each replication to draw its own random maintenance windows, use
+`--maintenance random`.
 
 ### Why keyword-only arguments?
 
@@ -293,6 +339,31 @@ wrong order when a function has many numeric parameters.
 All processing-time parameters in this project are currently assumption-based.
 Once real production data is available:
 
-1. Open `src/experiments/run_single_case.py`
-2. Update the `JobGenerationConfig` block with calibrated values
-3. Re-run the grid search to see how the results change
+**Station B (triangular distribution)** — open `src/experiments/run_single_case.py`
+and update the `JobGenerationConfig` block:
+
+```python
+gen_cfg = JobGenerationConfig(
+    mu_B_mean=60.0,        # ← update with observed average job time
+    mu_B_std=5.0,          # ← update with observed job-to-job spread
+    low_B_fraction=0.70,   # ← fastest observed time / average mode
+    high_B_fraction=1.50,  # ← slowest observed time / average mode
+)
+```
+
+**Station A (micro-stop model)** — open `src/experiments/run_single_case.py`
+and update the `MachineStopConfig` block:
+
+```python
+stop_cfg = MachineStopConfig(
+    mean_uptime_between_stops=68.57,  # ← avg running minutes between stops
+    mean_stop_duration=8.0,           # ← avg stop duration in minutes
+    stop_duration_cv=1.0,             # ← coefficient of variation for stop duration
+)
+```
+
+After updating, re-run the grid search to see how results change:
+
+```bash
+python -m src.experiments.run_grid_search
+```

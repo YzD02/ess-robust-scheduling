@@ -35,6 +35,7 @@ Key parameters
 """
 
 from dataclasses import dataclass
+import math
 import random
 from typing import Dict
 
@@ -50,23 +51,45 @@ class JobGenerationConfig:
     baseline for the ESS line; replace them with calibrated values once real
     production data becomes available.
 
-    Attributes
-    ----------
+    Station A parameters
+    --------------------
     mu_A_mean, mu_A_std   : mean and spread of Station A processing times
-    mu_B_mean, mu_B_std   : mean and spread of Station B processing times
     sigma_A_mean/std      : mean and spread of per-job uncertainty at Station A
-    sigma_B_mean/std      : mean and spread of per-job uncertainty at Station B
-    min_processing        : floor for any sampled mean (prevents non-positive times)
-    min_sigma             : floor for any sampled standard deviation
+                            (used in the planning layer only; Station A variability
+                            in simulation is modelled via machine-stop events)
+
+    Station B parameters  (manual operation — triangular distribution)
+    --------------------
+    mu_B_mean, mu_B_std        : mean and spread of the per-job mode (most likely time)
+    low_B_fraction             : low  = mode × low_B_fraction  (best-case multiplier, < 1.0)
+    high_B_fraction            : high = mode × high_B_fraction (worst-case multiplier, > 1.0)
+
+    The triangular distribution is parameterised as (low, high, mode) where:
+        low  = shortest realistic processing time for a job
+        high = longest  realistic processing time for a job
+        mode = most frequently observed time (the peak of the triangle)
+
+    Example with defaults:
+        mode ≈ 60 min  →  low ≈ 60 × 0.70 = 42 min,  high ≈ 60 × 1.50 = 90 min
+
+    Once real factory data is available, estimate these from observations:
+        low  ← fastest job time recorded
+        high ← slowest job time recorded
+        mode ← most common / median job time
     """
+    # Station A
     mu_A_mean: float = 90.0
     mu_A_std: float = 6.0
-    mu_B_mean: float = 60.0
-    mu_B_std: float = 5.0
     sigma_A_mean: float = 14.0
     sigma_A_std: float = 2.0
-    sigma_B_mean: float = 18.0
-    sigma_B_std: float = 2.5
+
+    # Station B — triangular distribution
+    mu_B_mean: float = 60.0       # mean of the per-job mode
+    mu_B_std: float = 5.0         # job-to-job spread in the mode
+    low_B_fraction: float = 0.70  # low  = mode × 0.70  (30% below mode)
+    high_B_fraction: float = 1.50 # high = mode × 1.50  (50% above mode)
+
+    # Shared
     min_processing: float = 1.0
     min_sigma: float = 1.0
 
@@ -119,17 +142,23 @@ def generate_job_parameters(
 
     Returns
     -------
-    dict with keys ``jobs``, ``mu_A``, ``mu_B``, ``sigma_A``, ``sigma_B``.
+    dict with keys ``jobs``, ``mu_A``, ``mu_B``, ``low_B``, ``high_B``, ``sigma_A``.
     Each value is a dict mapping job id (int) → time in minutes (float).
+
+    Station B keys:
+        mu_B   — mode (most likely time) of the triangular distribution
+        low_B  — lower bound (best-case time) = mode × low_B_fraction
+        high_B — upper bound (worst-case time) = mode × high_B_fraction
     """
     cfg = config or JobGenerationConfig()
     rng = random.Random(seed)
 
     jobs = list(range(1, n_jobs + 1))
     mu_A: NumericDict = {}
-    mu_B: NumericDict = {}
+    mu_B: NumericDict = {}       # mode of the triangular distribution for Station B
+    low_B: NumericDict = {}      # lower bound (best-case time)
+    high_B: NumericDict = {}     # upper bound (worst-case time)
     sigma_A: NumericDict = {}
-    sigma_B: NumericDict = {}
 
     for j in jobs:
         mu_A[j] = _positive_normal(
@@ -138,29 +167,39 @@ def generate_job_parameters(
             cfg.mu_A_std,
             cfg.min_processing,
         )
-        mu_B[j] = _positive_normal(
+        mode_B = _positive_normal(
             rng,
             cfg.mu_B_mean * mu_scale,
             cfg.mu_B_std,
             cfg.min_processing,
         )
+        mu_B[j] = mode_B
+        low_B[j]  = max(cfg.min_processing, mode_B * cfg.low_B_fraction)
+        high_B[j] = mode_B * cfg.high_B_fraction
         sigma_A[j] = _positive_normal(
             rng,
             cfg.sigma_A_mean * sigma_scale,
             cfg.sigma_A_std,
             cfg.min_sigma,
         )
-        sigma_B[j] = _positive_normal(
-            rng,
-            cfg.sigma_B_mean * sigma_scale,
-            cfg.sigma_B_std,
-            cfg.min_sigma,
-        )
+
+    # Derive sigma_B analytically from the triangular distribution parameters.
+    # For a triangular(low, high, mode), the standard deviation is:
+    #   std = sqrt((low² + high² + mode² - low×high - low×mode - high×mode) / 18)
+    # This is used in the planning layer (robust_processing.py) to size the
+    # safety buffer.  It is NOT used in simulation — actual times are drawn
+    # directly from the triangular distribution there.
+    sigma_B: NumericDict = {}
+    for j in jobs:
+        a, b, c = low_B[j], high_B[j], mu_B[j]
+        sigma_B[j] = math.sqrt((a**2 + b**2 + c**2 - a*b - a*c - b*c) / 18.0)
 
     return {
-        "jobs": jobs,
-        "mu_A": mu_A,
-        "mu_B": mu_B,
+        "jobs":    jobs,
+        "mu_A":    mu_A,
+        "mu_B":    mu_B,    # mode of triangular distribution
+        "low_B":   low_B,   # lower bound of triangular distribution
+        "high_B":  high_B,  # upper bound of triangular distribution
         "sigma_A": sigma_A,
-        "sigma_B": sigma_B,
+        "sigma_B": sigma_B, # derived from triangular params; used in planning layer only
     }
