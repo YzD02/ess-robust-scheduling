@@ -252,6 +252,71 @@ python -m src.visualization.plot_phase_diagram
 
 ---
 
+## Factory data EDA
+
+The `src/eda/explore_factory_data.py` script performs exploratory analysis on
+the raw company data (Samjin E5SP TOP Tape line, Jan–Apr) and produces the
+figures and statistics used to calibrate the machine-stop parameters.
+
+### Setup
+
+The raw Excel file is not committed to this repository.  Place it at:
+
+```
+data/E5SP_TOP_Tape_Production_Records_Jan-Apr.xlsx
+```
+
+Create the `data/` folder if it does not exist:
+
+```bash
+mkdir data
+```
+
+Then copy the Excel file there.  Git will ignore it (see `.gitignore`).
+
+### How to run
+
+```bash
+python -m src.eda.explore_factory_data
+```
+
+Or with explicit paths:
+
+```bash
+python -m src.eda.explore_factory_data \
+    --input  data/E5SP_TOP_Tape_Production_Records_Jan-Apr.xlsx \
+    --out-dir results/factory_eda
+```
+
+### Outputs
+
+All files are written to `results/factory_eda/` (created automatically):
+
+| File | Contents |
+|---|---|
+| `production_daily.csv` | Daily plan vs actual output, achievement rate, output-per-person |
+| `machine_trouble_daily.csv` | Daily stoppage counts and lost-time minutes |
+| `underachievement_log.csv` | Cleaned under-achievement reason log |
+| `eda_summary.txt` | All key statistics in one text file |
+| `figures/fig1_achievement_rate_distribution.png` | Achievement rate histogram + monthly boxplots |
+| `figures/fig2_achievement_rate_timeline.png` | Day-by-day timeline coloured by failure category |
+| `figures/fig3_stoppage_two_layer_structure.png` | Micro-stops vs long-duration events scatter + histogram |
+| `figures/fig4_lost_time_composition.png` | Daily lost-time stacked bar chart |
+| `figures/fig5_failure_category_breakdown.png` | Failure category frequency and production impact |
+| `figures/fig6_machinestop_calibration.png` | Data-derived vs previous default MachineStopConfig parameters |
+
+### What the EDA informed
+
+| Model component | Status after EDA |
+|---|---|
+| `MachineStopConfig.mean_uptime_between_stops` | Updated 68.57 → 9.21 min (data-informed) |
+| `MachineStopConfig.mean_stop_duration` | Updated 8.0 → 0.55 min (data-informed) |
+| Station A / B processing times | Kept as batch-level assumptions (no station-level C/T in data) |
+| Triangular distribution bounds | Kept as assumptions (line-level C/T proxy cannot be decomposed) |
+
+See `DATA_INFORMED_PARAMETER_UPDATE_NOTES.md` for full reasoning.
+
+
 ## Understanding the outputs
 
 ### Phase diagram — the big picture
