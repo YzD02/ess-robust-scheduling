@@ -1,52 +1,34 @@
 from __future__ import annotations
 
-"""Grid search experiment: systematically sweep job counts and robustness factors.
+"""Grid search experiment for data-informed scheduling scenarios.
 
 What this script does
 ---------------------
-Tests every combination of job count and k value in the parameter grid,
-running the full planning → simulation pipeline for each one and recording
-the results in a single CSV file.
+Tests combinations of job count and robustness factor k, then records the
+planning and Monte Carlo simulation results in one CSV file.
 
-For each parameter combination the script:
-  1. Generates a set of jobs with the given mu_scale / sigma_scale
-  2. Solves the Gurobi day-assignment model to produce a weekly schedule
-  3. Runs Monte Carlo simulation to estimate how often the schedule
-     survives real-world variability and maintenance disruptions
-  4. Appends one result row to the output CSV immediately (so progress is
-     not lost if the run is interrupted)
+This version keeps the batch-level job abstraction and updates the machine-stop
+layer using Jan-Apr factory EDA.  It is intentionally smaller than the earlier
+large stress grid so the results can be generated quickly for presentation.
+
+Default quick grid
+------------------
+  n_jobs: 20,30,40,50
+  k:      0.5,1.0,1.5
+  reps:   20
 
 How to run
 ----------
-Full grid (default settings, takes roughly 10–30 minutes):
+Quick presentation grid:
 
-    python -m src.experiments.run_grid_search
+    python -m src.experiments.run_grid_search \
+        --n-values 20,30,40,50 \
+        --k-values 0.5,1.0,1.5 \
+        --replications 20 \
+        --maintenance "1:4,5;2:1,2,3" --unscheduled skip \
+        --out results/grid_search/grid_search_results_data_calibrated_quick.csv
 
-Quick validation run (~2–5 minutes):
-
-    python -m src.experiments.run_grid_search --n-values 20,40 --k-values 0.5,1.0 --replications 20
-
-Available command-line options
--------------------------------
-  --n-values       comma-separated job counts to test  (default: 20,40,60,80,100)
-  --k-values       comma-separated k values to test    (default: 0.5,1.0,1.5,2.0)
-  --mu-scales      comma-separated mu scaling factors  (default: 1.0)
-  --sigma-scales   comma-separated sigma scaling       (default: 1.0)
-  --replications   Monte Carlo runs per case           (default: 100)
-  --seed           base random seed                    (default: 42)
-  --out            output CSV file path
-
-Output
-------
-  results/grid_search/grid_search_results_weekend_extension.csv
-
-This CSV can be passed directly to plot_heatmaps.py and plot_phase_diagram.py
-to generate the visualisation figures.
-
-Note on re-running
-------------------
-Re-running the script overwrites the existing CSV.  If you want to keep a
-previous result set, rename or copy the file before running again.
+For a larger stress grid, override --n-values, --k-values, and --replications.
 """
 
 import argparse
@@ -66,7 +48,7 @@ from src.simulation.simulation_engine import (
 )
 from src.utils.maintenance import resolve_maintenance_map
 
-DEFAULT_REPLICATIONS = 100
+DEFAULT_REPLICATIONS = 20
 
 
 def parse_float_list(text: str) -> list[float]:
@@ -122,6 +104,10 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
                       gurobi_time_limit_sec, weekend_fixed_cost, weekend_variable_cost,
                       maintenance_map=None, candidate_days=None,
                       unscheduled_weeks_policy='random', output_flag=0):
+    # Batch-level job abstraction retained:
+    #   one job = one production workload block, not one physical unit.
+    # Station-level C/T is not directly available in the company data, so the
+    # original processing-time assumptions remain unchanged.
     gen_cfg = JobGenerationConfig(
         mu_A_mean=90.0, mu_A_std=6.0,
         mu_B_mean=60.0, mu_B_std=5.0,
@@ -177,9 +163,11 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         weekend_variable_cost=weekend_variable_cost,
         maintenance_duration=120.0,
     )
+    # Data-informed micro-stop layer from Jan-Apr Automation Results.
+    # Median values are used to reduce the influence of outlier days.
     stop_cfg = MachineStopConfig(
-        mean_uptime_between_stops=68.57,
-        mean_stop_duration=8.0,
+        mean_uptime_between_stops=9.21,
+        mean_stop_duration=0.55,
         stop_duration_cv=1.0,
     )
 
@@ -191,6 +179,12 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         'mu_scale': mu_scale,
         'sigma_scale': sigma_scale,
         'k': k,
+        'job_abstraction': 'batch_level_workload_not_one_physical_unit',
+        'ct_proxy_min_per_unit_median': 2.34,
+        'approx_units_per_model_job': 64,
+        'mean_uptime_between_stops': stop_cfg.mean_uptime_between_stops,
+        'mean_stop_duration': stop_cfg.mean_stop_duration,
+        'stop_duration_cv': stop_cfg.stop_duration_cv,
         'gurobi_status': gurobi_result.status,
         'solve_time_sec': gurobi_result.solve_time_sec,
         'solve_wall_time_sec': solve_wall_time,
@@ -259,17 +253,17 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
 
 def main():
     parser = argparse.ArgumentParser(description='Run weekend-extension grid search with maintenance-aware execution.')
-    parser.add_argument('--n-values', type=str, default='20,40,60,80,100', help='Comma-separated job counts.')
+    parser.add_argument('--n-values', type=str, default='20,30,40,50', help='Comma-separated batch-job counts.')
     parser.add_argument('--mu-scales', type=str, default='1.0', help='Comma-separated mu scaling factors.')
     parser.add_argument('--sigma-scales', type=str, default='1.0', help='Comma-separated sigma scaling factors.')
-    parser.add_argument('--k-values', type=str, default='0.5,1.0,1.5,2.0', help='Comma-separated k values.')
+    parser.add_argument('--k-values', type=str, default='0.5,1.0,1.5', help='Comma-separated k values.')
     parser.add_argument('--replications', type=int, default=DEFAULT_REPLICATIONS, help='Monte Carlo replications for accepted cases.')
-    parser.add_argument('--out', type=str, default='results/grid_search/grid_search_results_weekend_extension.csv', help='Output CSV path.')
+    parser.add_argument('--out', type=str, default='results/grid_search/grid_search_results_data_calibrated_quick.csv', help='Output CSV path.')
     parser.add_argument('--weekday-days', type=int, default=20, help='Number of weekday bins planned by Gurobi.')
     parser.add_argument('--weekend-extension-days', type=int, default=8, help='Number of weekend extension bins available in simulation.')
     parser.add_argument('--weekend-fixed-cost', type=float, default=300.0, help='Fixed cost for activating one weekend extension day.')
     parser.add_argument('--weekend-variable-cost', type=float, default=8.0, help='Variable cost per minute used in a weekend extension day.')
-    parser.add_argument('--gurobi-time-limit-sec', type=float, default=900.0, help='Maximum solve time for Gurobi.')
+    parser.add_argument('--gurobi-time-limit-sec', type=float, default=120.0, help='Maximum solve time for Gurobi.')
     parser.add_argument('--seed', type=int, default=42, help='Base random seed.')
     parser.add_argument('--output-flag', type=int, default=0, help='Gurobi OutputFlag (0 or 1).')
     parser.add_argument(

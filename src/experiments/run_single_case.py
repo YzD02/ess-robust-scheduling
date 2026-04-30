@@ -1,51 +1,57 @@
 from __future__ import annotations
 
-"""Run one complete end-to-end experiment with fixed parameters.
+"""Run one complete end-to-end scheduling experiment.
 
 What this script does
 ---------------------
 Executes the full pipeline — planning → simulation → output — for a single
-parameter combination (50 jobs, k = 1.0 by default).
+parameter combination.  This version keeps the original **batch-level job**
+abstraction and updates only the machine-stop layer using the Jan-Apr factory
+EDA.
 
-When to use this script
------------------------
-  1. First run after setup: verify that your environment and Gurobi license
-     are working correctly before running the longer grid search.
-  2. Deep inspection: examine exactly how one scenario plays out day by day,
-     including backlog build-up, maintenance windows, and weekend recovery.
-  3. Debugging: faster feedback loop than running the full grid search.
+Important modelling interpretation
+----------------------------------
+A model job is **not** one physical unit.  It represents a batch-level
+production workload.  The real data provides line-level and shift-level output,
+but not work-order-level or station-level cycle time.  Therefore:
+
+  - Station A / Station B processing times remain the batch-level assumptions.
+  - The line-level C/T proxy is used only to interpret model scale.
+  - The machine-stop process is recalibrated from the company trouble log.
+
+Default run
+-----------
+The default case uses 40 jobs and k = 1.0.  This is a quick, presentation-ready
+scenario.  For a heavier case, override with --n-jobs 50 or --n-jobs 60.
 
 How to run
 ----------
-Default parameters (50 jobs, k = 1.0):
+Default parameters:
 
     python -m src.experiments.run_single_case
 
-Override any parameter on the command line:
+Recommended presentation run:
 
-    python -m src.experiments.run_single_case --n-jobs 60 --k 1.0
-    python -m src.experiments.run_single_case --n-jobs 60 --k 0.5 --seed 99
-    python -m src.experiments.run_single_case --help   # show all available options
+    python -m src.experiments.run_single_case \
+        --n-jobs 40 --k 1.0 --seed 42 --replications 20 \
+        --maintenance "1:4,5;2:1,2,3" --unscheduled skip \
+        --out-dir results/simulation_outputs_data_calibrated_quick
 
 Available options
 -----------------
-  --n-jobs        number of jobs to schedule          (default: 50)
+  --n-jobs        number of batch jobs to schedule    (default: 40)
   --k             robustness buffer factor            (default: 1.0)
   --mu-scale      multiplier for all mean job times   (default: 1.0)
   --sigma-scale   multiplier for all standard devs    (default: 1.0)
   --seed          random seed                         (default: 42)
-  --replications  Monte Carlo replications            (default: 100)
+  --replications  Monte Carlo replications            (default: 20)
   --out-dir       output directory for CSV files      (default: results/simulation_outputs)
 
-Output files  (saved to results/simulation_outputs/)
------------------------------------------------------
-  gantt_events_single_run.csv   — start/end time for every job at every
-                                  station; feed into plot_gantt.py to visualise
-  single_run_day_summary.csv    — per-day statistics: jobs executed, backlog
-                                  count, utilisation rate, overflow flag
-  single_run_mc_summary.csv     — aggregated statistics over 100 Monte Carlo
-                                  replications (clear probability, avg weekend
-                                  days used, avg final completion day, etc.)
+Output files
+------------
+  gantt_events_single_run.csv   — start/end time for every job at every station
+  single_run_day_summary.csv    — per-day execution, backlog, and maintenance
+  single_run_mc_summary.csv     — Monte Carlo summary over replications
 """
 
 from pathlib import Path
@@ -76,12 +82,12 @@ def main():
         description="Run one end-to-end ESS scheduling experiment.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--n-jobs",       type=int,   default=50,   help="Number of jobs to schedule.")
+    parser.add_argument("--n-jobs",       type=int,   default=40,   help="Number of batch-level jobs to schedule.")
     parser.add_argument("--k",            type=float, default=1.0,  help="Robustness buffer factor (0 = no buffer, 2 = very conservative).")
     parser.add_argument("--mu-scale",     type=float, default=1.0,  help="Multiplier for all mean processing times (>1 = heavier workload).")
     parser.add_argument("--sigma-scale",  type=float, default=1.0,  help="Multiplier for all standard deviations (>1 = more variability).")
     parser.add_argument("--seed",         type=int,   default=42,   help="Random seed for reproducibility.")
-    parser.add_argument("--replications", type=int,   default=100,  help="Number of Monte Carlo replications.")
+    parser.add_argument("--replications", type=int,   default=20,   help="Number of Monte Carlo replications.")
     parser.add_argument("--out-dir",      type=str,   default="results/simulation_outputs",
                         help="Directory to save output CSV files.")
     parser.add_argument(
@@ -130,12 +136,23 @@ def main():
     else:
         print("Maintenance schedule: fully random (generated per replication from seed).")
 
-    # Job generation config: these are assumption-based baseline values.
-    # Replace with calibrated values once real production data is available.
-    # Station B now uses a triangular distribution: low_B_fraction and
-    # high_B_fraction define the best-case and worst-case multipliers on
-    # the mode (mu_B).  For example, 0.70 means the minimum time is 70%
-    # of the mode; 1.50 means the maximum is 150% of the mode.
+    # -----------------------------------------------------------------------
+    # Job generation config — retained as batch-level scheduling abstraction
+    # -----------------------------------------------------------------------
+    # The company data gives line-level output and output-per-person, but it
+    # does not give station-level C/T or work-order-level processing times.
+    # Therefore, do NOT set one model job equal to one physical unit.
+    #
+    # In this model, one job represents a batch-level production workload.
+    # The original total mean processing time is kept at about 150 min/job:
+    #   Station A mean = 90 min, Station B mode = 60 min.
+    #
+    # EDA scale interpretation only:
+    #   median implied C/T proxy = 480 / 205 ≈ 2.34 min/unit.
+    #   150 min/job / 2.34 min/unit ≈ 60-65 units per batch job.
+    #
+    # Station B keeps the triangular manual-variability assumption because
+    # individual worker C/T data is not available.
     gen_cfg = JobGenerationConfig(
         mu_A_mean=90.0,          # average Station A time per job (minutes)
         mu_A_std=6.0,            # job-to-job spread in Station A times
@@ -168,7 +185,7 @@ def main():
     Cost_OT = 5.0        # cost per overtime minute (used to penalise overtime usage)
     Cost_fix = 180.0     # fixed cost for activating overtime on any given day
     M = 2000.0           # big-M constant for the overtime activation constraint
-    time_limit_sec = 900.0  # maximum solver time: 15 minutes
+    time_limit_sec = 120.0  # practical solver time limit for quick presentation runs (2 minutes)
 
     p_nominal, p_robust = compute_robust_processing_times(
         mu_A=mu_A,
@@ -188,14 +205,24 @@ def main():
         maintenance_duration=120.0,   # planned maintenance window per week (minutes)
     )
 
-    # Machine-stop model for Station A (automated equipment)
-    # Micro-stops interrupt the machine at random intervals for random durations.
-    # These values are assumption-based; replace with real maintenance logs when available.
+    # -----------------------------------------------------------------------
+    # Machine-stop model for Station A — updated from factory EDA
+    # -----------------------------------------------------------------------
+    # Source: Automation Results trouble log, Jan-Apr.
+    # The raw data is aggregated by day/shift, not per incident.  Therefore,
+    # these are calibration proxies, not direct timestamp-level estimates.
+    #
+    # EDA result:
+    #   Old assumption: uptime 68.57 min, stop duration 8.0 min.
+    #   Data pattern: frequent short micro-stops.
+    #   Median-based update: uptime ≈ 9.21 min, stop duration ≈ 0.55 min.
+    #
+    # Long-duration losses are treated as a separate reliability layer, not
+    # folded into the micro-stop duration parameter.
     stop_cfg = MachineStopConfig(
-        mean_uptime_between_stops=68.57,  # average running time before a stop (minutes)
-        mean_stop_duration=8.0,           # average duration of each stop (minutes)
-        stop_duration_cv=1.0,             # coefficient of variation for stop duration
-                                          # (1.0 = exponential-like, high variability)
+        mean_uptime_between_stops=9.21,
+        mean_stop_duration=0.55,
+        stop_duration_cv=1.0,
     )
 
     gurobi_result = solve_gurobi_baseline(
@@ -237,7 +264,7 @@ def main():
         high_B=high_B,
         policy=policy,
         stop_cfg=stop_cfg,
-        seed=42,
+        seed=random_seed,
         simulation_run=1,
         maintenance_map=maintenance_map,
         candidate_days=candidate_days,
@@ -309,7 +336,7 @@ def main():
     day_summary_df.to_csv(day_summary_csv_path, index=False)
     print(f"Saved day summary to: {day_summary_csv_path}")
 
-    n_replications = 100
+    n_replications = args.replications
     summary = monte_carlo_breakdown_analysis(
         schedule_dict=schedule,
         mu_A=mu_A,
@@ -319,7 +346,7 @@ def main():
         policy=policy,
         stop_cfg=stop_cfg,
         n_replications=n_replications,
-        base_seed=42,
+        base_seed=random_seed,
         maintenance_map=maintenance_map,
         candidate_days=candidate_days,
         unscheduled_weeks_policy=unscheduled_weeks_policy,
@@ -334,6 +361,13 @@ def main():
         'mu_scale': mu_scale,
         'sigma_scale': sigma_scale,
         'k': k,
+        'n_replications': n_replications,
+        'job_abstraction': 'batch_level_workload_not_one_physical_unit',
+        'ct_proxy_min_per_unit_median': 2.34,
+        'approx_units_per_model_job': 64,
+        'mean_uptime_between_stops': stop_cfg.mean_uptime_between_stops,
+        'mean_stop_duration': stop_cfg.mean_stop_duration,
+        'stop_duration_cv': stop_cfg.stop_duration_cv,
         'avg_nominal_job_time': sum(p_nominal.values()) / len(p_nominal),
         'avg_robust_job_time': sum(p_robust.values()) / len(p_robust),
         'prob_cleared_within_weekdays': summary['prob_cleared_within_weekdays'],
