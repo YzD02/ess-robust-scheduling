@@ -112,8 +112,8 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         mu_A_mean=90.0, mu_A_std=6.0,
         mu_B_mean=60.0, mu_B_std=5.0,
         sigma_A_mean=14.0, sigma_A_std=2.0,
-        low_B_fraction=0.70,
-        high_B_fraction=1.50,
+        low_B_fraction=0.88,
+        high_B_fraction=1.60,
     )
     generated = generate_job_parameters(
         n_jobs=n_jobs,

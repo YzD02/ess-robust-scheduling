@@ -160,8 +160,8 @@ def main():
         mu_B_std=5.0,            # job-to-job spread in the mode
         sigma_A_mean=14.0,       # average within-job uncertainty at Station A
         sigma_A_std=2.0,
-        low_B_fraction=0.70,     # best case  = mode × 0.70
-        high_B_fraction=1.50,    # worst case = mode × 1.50
+        low_B_fraction=0.88,     # best case  = mode × 0.70
+        high_B_fraction=1.60,    # worst case = mode × 1.50
     )
 
     generated = generate_job_parameters(
