@@ -1,0 +1,236 @@
+
+================================================================================
+  ESS Robust Scheduling — Factory Data Exploratory Analysis
+  Source: E5SP_TOP_Tape_Production_Records_Jan-Apr.xlsx
+================================================================================
+
+================================================================================
+  PRODUCTION RECORDS — KEY STATISTICS
+================================================================================
+
+--- Overall (all months, daily-total rows only) ---
+  Daily actual output (units)               n= 81  mean= 1133.68  median= 1215.00  std= 241.97  min= 270.00  p10= 810.00  p90=1350.00  max=1620.00
+  Daily plan qty (units)                    n= 81  mean= 1173.33  median= 1200.00  std= 120.00  min= 600.00  p10=1200.00  p90=1200.00  max=1200.00
+  Achievement rate                          n= 81  mean=    0.96  median=    1.02  std=   0.18  min=   0.45  p10=   0.69  p90=   1.14  max=   1.35
+  Output per person (units/shift)           n= 81  mean=  190.14  median=  205.00  std=  38.77  min=  90.00  p10= 135.00  p90= 225.00  max= 270.00
+
+  Days below plan (rate < 1.0): 35 / 81  (43.2%)
+
+--- Cycle time analysis ---
+  Individual station C/T data is not available. The company tracks
+  only daily headcount and line-level output per shift.
+
+  Two measures are computed below — they are NOT the same thing:
+
+  (A) Per-worker C/T  = SHIFT_MINUTES / output_per_person
+      = 2.37 min/unit  (day shift median)
+      This is the time ONE WORKER spends per unit.
+      It is NOT the rate at which the whole line produces units.
+      With ~3 workers in parallel, the line runs ~3x faster than
+      this number implies.
+
+  (B) Whole-line takt = SHIFT_MINUTES / actual_qty_per_shift
+      = 0.78 min/unit  (day shift median)
+      This is the true throughput rate of the whole line.
+      Relationship: takt = per_worker_ct / n_workers
+                    0.78 = 2.37 / 3.0 workers  ✓
+
+  For model batch-size interpretation, always use (B), NOT (A).
+
+  (A) Per-worker C/T — all shifts     n=158  median= 2.34  mean= 3.03  min= 1.71  max=32.00
+  (A) Per-worker C/T — day shift       n= 80  median= 2.37  mean= 3.26  min= 1.71  max=32.00
+  (A) Per-worker C/T — night shift     n= 78  median= 2.29  mean= 2.79  min= 1.71  max=16.00
+  (B) Whole-line takt — day shift      n= 80  median= 0.78  mean= 1.05  min= 0.34  max=10.67
+  (B) Whole-line takt — night shift    n= 78  median= 0.76  mean= 0.92  min= 0.57  max= 5.33
+
+  ---------------------------------------------------------------
+  CORRECTED BATCH SIZE AND MODEL SCALE
+  ---------------------------------------------------------------
+
+  Previous (incorrect) interpretation:
+    Used per-worker C/T (2.37 min/unit) as if it were the line rate.
+    => 150 min/job / 2.37 = 63 units/job
+    => 19 jobs/day came from this: 1,200 / 63 = 19.0
+
+  Corrected interpretation:
+    Use whole-line takt (0.78 min/unit).
+    => 150 min/job / 0.78 = 192 units/job  [CORRECT]
+    => The previous figure was understated by ~3x (= number of workers)
+
+  Internal consistency check:
+    480 min/shift / 150 min/job        =  3.2 jobs/shift
+    3.2 jobs  x  192 units/job         =  614 units/shift
+    Factory actual (day shift median)  =  615 units/shift  ✓
+
+    Two shifts/day:
+    3.2 x 2 = 6.4 jobs/day  x  192 units  =  1,229 units/day
+    Factory daily target                   =  1,200 units/day  ✓
+
+  What the current grid search represents:
+    50 jobs / 20 days = 2.5 jobs/day x 192 units = 480 units/day
+    => model runs at ~40% of factory's single-shift capacity
+
+    To match full factory scale (two shifts, 1,200 units/day):
+      1,200 / 192 = 6.25 jobs/day  =>  ~125 jobs over 20 days
+
+  ---------------------------------------------------------------
+  STATION A — MACHINE STOP OVERHEAD
+  ---------------------------------------------------------------
+
+  mu_A (pure processing time, assumption)  =  90 min
+  Machine stop parameters (data-calibrated from EDA):
+    mean_uptime_between_stops  =  9.21 min
+    mean_stop_duration         =  0.55 min
+
+  Expected machine stop overhead per job at Station A:
+    Expected number of stops  =  90 / 9.21  =  9.77 stops
+    Expected stop time        =  9.77 x 0.55  =  5.4 min
+    Overhead fraction         =  5.4 / 90  =  6.0%
+
+  Effective Station A time (incl. stops)   =  90 + 5.4  =  95.4 min
+  Note: the simulation draws stops stochastically on top of mu_A.
+  The 95.4 min is the expected value — actual time varies per run.
+
+  Previous defaults (assumption-based, not data-informed):
+    mean_uptime_between_stops  =  68.57 min  (7.5x too long)
+    mean_stop_duration         =   8.0  min  (14.5x too long)
+  The old defaults implied rare long stops. The data shows the
+  opposite: frequent short micro-stops (~52/shift, ~0.55 min each).
+
+  ---------------------------------------------------------------
+  STATION B — TRIANGULAR DISTRIBUTION OPTIONS
+  ---------------------------------------------------------------
+
+  mu_B (mode, assumption)  =  60 min
+  No Station B timestamps available — bounds cannot be directly
+  calibrated from the current dataset.
+
+  Option A — assumption-based (current model):
+    low  = 60 x 0.70 = 42 min  (best case: 30% faster than mode)
+    mode = 60 min
+    high = 60 x 1.50 = 90 min  (worst case: 50% slower than mode)
+
+  Option B — achievement-rate proxy:
+    p90 achievement = 1.14  =>  best days finish in 1/1.14 = 0.88x mode
+    p10 achievement = 0.69  =>  worst days take  1/0.69  = 1.45x mode
+    low  = 60 x 0.88 = 53 min
+    mode = 60 min
+    high = 60 x 1.45 = 87 min
+
+  Comparison:
+    Option A high end (1.50) is slightly more conservative than
+    Option B (1.45) — similar. The main difference is the low end:
+    Option A (0.70) implies the line can run 30% faster than mode;
+    Option B (0.88) from the data suggests best-case is only ~12%
+    faster. Option A may be slightly optimistic on the low end.
+
+  IMPORTANT: Option B uses the whole-line achievement rate as a
+  proxy for Station B variability. This conflates machine stops,
+  upstream disruptions, and worker variability — it is a sanity
+  check, not a direct calibration. Direct calibration requires
+  per-job Station B timestamps not available in this dataset.
+
+  ---------------------------------------------------------------
+  DATA-INFORMED vs ASSUMPTION SUMMARY
+  ---------------------------------------------------------------
+
+  Data-informed:   machine stop parameters (uptime 9.21, duration 0.55)
+  Data-informed:   whole-line takt (0.78 min/unit, day shift median)
+  Data-informed:   worker count per shift (~3, median)
+  Data-informed:   factory daily target (1,200 units/day)
+  Assumption:      mu_A = 90 min  (no Station A timestamps)
+  Assumption:      mu_B = 60 min  (no Station B timestamps)
+  Assumption:      A/B time split ratio (currently 60/40)
+  Assumption:      triangular bounds (0.70/1.50 or 0.88/1.45)
+  Needs confirm:   total job processing time T = mu_A + mu_B = 150 min
+  Needs confirm:   factory definition of one job or work order
+
+
+--- Monthly breakdown (daily-total rows) ---
+
+  Month: Jan  (n=21 operating days)
+    Actual output                           n= 21  mean= 1144.19  median= 1200.00  std= 166.92  min= 825.00  p10= 900.00  p90=1320.00  max=1380.00
+    Achievement rate                        n= 21  mean=    0.95  median=    1.00  std=   0.14  min=   0.69  p10=   0.75  p90=   1.10  max=   1.15
+    Output per person                       n= 21  mean=  190.70  median=  200.00  std=  27.82  min= 137.50  p10= 150.00  p90= 220.00  max= 230.00
+
+  Month: Feb  (n=19 operating days)
+    Actual output                           n= 19  mean= 1252.11  median= 1335.00  std= 213.56  min= 705.00  p10= 957.00  p90=1365.00  max=1620.00
+    Achievement rate                        n= 19  mean=    1.07  median=    1.11  std=   0.14  min=   0.69  p10=   0.86  p90=   1.15  max=   1.35
+    Output per person                       n= 19  mean=  214.87  median=  222.50  std=  28.34  min= 137.50  p10= 173.00  p90= 229.00  max= 270.00
+
+  Month: Mar  (n=22 operating days)
+    Actual output                           n= 22  mean= 1174.77  median= 1290.00  std= 252.21  min= 660.00  p10= 730.50  p90=1363.50  max=1410.00
+    Achievement rate                        n= 22  mean=    1.00  median=    1.09  std=   0.19  min=   0.56  p10=   0.69  p90=   1.14  max=   1.18
+    Output per person                       n= 22  mean=  200.80  median=  218.75  std=  37.66  min= 112.50  p10= 138.00  p90= 227.25  max= 235.00
+
+  Month: Apr  (n=19 operating days)
+    Actual output                           n= 19  mean=  956.05  median=  945.00  std= 243.20  min= 270.00  p10= 774.00  p90=1209.00  max=1395.00
+    Achievement rate                        n= 19  mean=    0.82  median=    0.79  std=   0.17  min=   0.45  p10=   0.65  p90=   1.01  max=   1.16
+    Output per person                       n= 19  mean=  152.44  median=  152.50  std=  32.83  min=  90.00  p10= 110.89  p90= 198.00  max= 207.50
+
+================================================================================
+  MACHINE TROUBLE LOG — KEY STATISTICS
+================================================================================
+
+--- Overall (all operating days) ---
+  Daily stoppage count (total)              n= 78  mean=  111.09  median=   97.00  std=  42.88  min=  30.00  p10=  64.70  p90= 176.60  max= 250.00
+  Daily stoppage count (day shift)          n= 77  mean=   56.25  median=   52.00  std=  25.74  min=   0.00  p10=  25.60  p90=  89.00  max= 136.00
+  Daily stoppage count (night shift)        n= 77  mean=   56.29  median=   54.00  std=  27.02  min=   0.00  p10=  31.20  p90=  94.60  max= 128.00
+  Total lost time per day (min)             n= 78  mean=  100.35  median=   71.50  std=  86.56  min=  25.00  p10=  40.00  p90= 172.10  max= 570.00
+  Long-duration loss per day (min)          n= 76  mean=   35.03  median=    0.00  std=  87.91  min=   0.00  p10=   0.00  p90= 105.00  max= 530.00
+
+--- MachineStopConfig parameter estimates (micro-stops only) ---
+  Long-duration events are excluded from these estimates.
+  Per-incident timestamps are not available — these are approximations
+  from aggregated daily totals.
+  Micro-stop lost time (excl. long-duration events):
+    mean=66.2 min/day  median=60.0 min/day  (n=78 days)
+  Estimated mean stop duration:          mean=0.62 min  median=0.55 min
+  Estimated mean uptime between stops:   mean=9.39 min  median=9.21 min
+
+  Suggested MachineStopConfig values (micro-stop layer only):
+    mean_stop_duration        = 0.55  (median; mean=0.62)
+    mean_uptime_between_stops = 9.21  (median; mean=9.39)
+  Previous defaults: mean_stop_duration=8.0, mean_uptime_between_stops=68.57
+  Note: median is preferred over mean here because a few high-lost-time
+        days skew the mean upward.
+  Per-day est. mean stop duration (min, micro only)  n= 78  mean=    0.62  median=    0.55  std=   0.26  min=   0.32  p10=   0.46  p90=   0.86  max=   1.97
+  Per-day est. mean uptime between stops (min, micro only)  n= 78  mean=    9.39  median=    9.21  std=   4.13  min=   3.39  p10=   4.83  p90=  14.27  max=  30.17
+
+--- Monthly breakdown ---
+
+  Month: Jan  (n=21 operating days)
+    Stoppage count (total)                  n= 21  mean=  118.62  median=  118.00  std=  37.54  min=  54.00  p10=  79.00  p90= 178.00  max= 188.00
+    Total lost time (min)                   n= 21  mean=  112.38  median=  100.00  std=  87.63  min=  40.00  p10=  50.00  p90= 170.00  max= 420.00
+
+  Month: Feb  (n=19 operating days)
+    Stoppage count (total)                  n= 19  mean=   99.11  median=   90.00  std=  29.50  min=  64.00  p10=  72.60  p90= 130.60  max= 180.00
+    Total lost time (min)                   n= 19  mean=   83.68  median=   50.00  std= 119.17  min=  30.00  p10=  40.00  p90=  92.00  max= 570.00
+
+  Month: Mar  (n=22 operating days)
+    Stoppage count (total)                  n= 22  mean=   92.45  median=   89.00  std=  34.42  min=  30.00  p10=  57.30  p90= 138.30  max= 168.00
+    Total lost time (min)                   n= 22  mean=   86.89  median=   60.50  std=  69.29  min=  25.00  p10=  40.00  p90= 139.35  max= 340.00
+
+  Month: Apr  (n=16 operating days)
+    Stoppage count (total)                  n= 16  mean=  141.06  median=  152.50  std=  55.94  min=  62.00  p10=  79.00  p90= 204.00  max= 250.00
+    Total lost time (min)                   n= 16  mean=  122.84  median=  106.50  std=  55.62  min=  59.00  p10=  68.75  p90= 205.00  max= 237.50
+
+================================================================================
+  UNDER-ACHIEVEMENT REASONS — FAILURE CATEGORY COUNTS
+================================================================================
+
+--- Total operating days in log: 120 ---
+  no_issue                    83  (69.2%)
+  injection_machine           18  (15.0%)
+  equipment_fault              7  (5.8%)
+  quality_defect               7  (5.8%)
+  other                        4  (3.3%)
+  safety_incident              1  (0.8%)
+
+--- Failure categories on days below plan (achievement rate < 1.0, n=35) ---
+  injection_machine           15  (42.9%)
+  quality_defect               7  (20.0%)
+  equipment_fault              5  (14.3%)
+  no_issue                     4  (11.4%)
+  other                        3  (8.6%)
+  safety_incident              1  (2.9%)
