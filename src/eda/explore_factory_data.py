@@ -54,17 +54,44 @@ Production section
   - Output-per-person: same set of stats
   - Monthly breakdown of the above
   - Count and fraction of days below plan (achievement rate < 1.0)
+  - Per-worker C/T proxy AND whole-line takt (these are different;
+    see the C/T section in analyse_production for the distinction)
+  - Model batch size interpretation (units per model job)
 
 Machine trouble section
   - Daily stoppage count: mean, median, std, min, max
-  - Daily total lost time (min): same stats
-  - Implied mean uptime between stops (approximation for MachineStopConfig)
-  - Implied mean stop duration (approximation for MachineStopConfig)
+  - Daily total lost time (min) and micro-stop-only lost time
+  - Implied mean uptime between stops (MachineStopConfig approximation,
+    derived from micro-stop-only lost time, not total lost time)
+  - Implied mean stop duration (MachineStopConfig approximation)
   - Monthly breakdown
 
 Under-achievement section
   - Counts of each broad failure category (equipment fault, injection-
     machine issue, parts shortage, quality defect, manual/safety)
+
+Important note on C/T proxy vs whole-line takt
+-----------------------------------------------
+The factory records output_per_person (units per worker per shift).
+Two distinct cycle-time measures can be derived:
+
+  per_worker_ct    = SHIFT_MINUTES / output_per_person
+                   ~ 2.34 min/unit  (median)
+                   Time one worker spends per unit. NOT the line rate.
+
+  whole_line_takt  = SHIFT_MINUTES / actual_qty_per_shift
+                   ~ 0.78 min/unit  (median, day shift)
+                   True throughput rate of the whole line.
+                   Equivalently: whole_line_takt = per_worker_ct / n_workers.
+
+The batch size for the scheduling model must use the whole-line takt:
+
+  units_per_model_job = (mu_A + mu_B) / whole_line_takt
+                      = 150 min / 0.78 min/unit
+                      ~ 192 units per model job
+
+Using per_worker_ct instead gives ~64 units/job (understated by ~3x,
+equal to the number of workers assigned per shift).
 """
 
 import argparse
@@ -391,7 +418,7 @@ def extract_underachievement_reasons(xl: pd.ExcelFile) -> pd.DataFrame:
     data["product"] = data["product"].ffill()
 
     # Keep only rows with a valid date.
-    data["date"] = pd.to_datetime(data["date_raw"], errors="coerce")
+    data["date"] = pd.to_datetime(data["date_raw"], errors="coerce", format="mixed")
     data = data[data["date"].notna()].copy()
 
     # Coerce achievement rate; rows with "Non-operating" in reason have no rate.
@@ -471,33 +498,74 @@ def analyse_production(df: pd.DataFrame, out_lines: list[str]) -> None:
     # This is a LINE-level C/T proxy — not station-level — but it is the best
     # estimate available from aggregate data.
     # ------------------------------------------------------------------
-    ct_section = "\n--- Implied cycle time proxy (min/unit = shift_minutes / output_per_person) ---"
+    ct_section = "\n--- Cycle time analysis ---"
     print(ct_section)
     out_lines.append(ct_section)
 
     ct_note = (
-        "  NOTE: Individual station C/T data is not available (company confirmed\n"
-        "  they track only line-level daily output, not per-worker or per-station\n"
-        "  cycle times).  The proxy below is computed as:\n"
-        "      implied_ct_min = SHIFT_MINUTES / output_per_person\n"
-        "  where SHIFT_MINUTES = 480 and output_per_person is the units produced\n"
-        "  per worker per shift.  This reflects total processing time per unit\n"
-        "  (both stations combined), not the individual station A or B C/T."
+        "  Individual station C/T data is not available. The company tracks\n"
+        "  only daily headcount and line-level output per shift.\n"
+        "\n"
+        "  Two measures are computed below:\n"
+        "\n"
+        "  (A) Per-worker C/T  = SHIFT_MINUTES / output_per_person\n"
+        "      This is the time ONE WORKER spends per unit. It is NOT the rate\n"
+        "      at which the line produces units. With 3 workers in parallel,\n"
+        "      the line runs ~3x faster than this number implies.\n"
+        "\n"
+        "  (B) Whole-line takt = SHIFT_MINUTES / actual_qty_per_shift\n"
+        "      This is the true throughput rate of the whole line.\n"
+        "      Equivalently: takt = per_worker_ct / n_workers.\n"
+        "\n"
+        "  For model batch-size interpretation, use the whole-line takt (B),\n"
+        "  NOT the per-worker C/T (A)."
     )
     print(ct_note)
     out_lines.append(ct_note)
 
-    # Compute CT proxy on per-shift rows (day and night separately)
+    # (A) Per-worker C/T
     shift_df = df[df["shift"].isin(["day", "night"])].copy()
     shift_df = shift_df[shift_df["output_per_person"] > 0].copy()
     shift_df["implied_ct_min"] = SHIFT_MINUTES / shift_df["output_per_person"]
 
     for label, subset in [
-        ("Implied C/T — all shifts",   shift_df),
-        ("Implied C/T — day shift",    shift_df[shift_df["shift"] == "day"]),
-        ("Implied C/T — night shift",  shift_df[shift_df["shift"] == "night"]),
+        ("(A) Per-worker C/T — all shifts (min/unit/worker)",  shift_df),
+        ("(A) Per-worker C/T — day shift",                     shift_df[shift_df["shift"] == "day"]),
+        ("(A) Per-worker C/T — night shift",                   shift_df[shift_df["shift"] == "night"]),
     ]:
         _print_stats(_summary_stats(subset["implied_ct_min"], label), out_lines)
+
+    # (B) Whole-line takt from actual qty per shift
+    day_df = df[(df["shift"] == "day") & (df["actual_qty"] > 0)].copy()
+    day_df["takt_min"] = SHIFT_MINUTES / day_df["actual_qty"]
+    _print_stats(_summary_stats(day_df["takt_min"], "(B) Whole-line takt — day shift (min/unit)"), out_lines)
+
+    night_df = df[(df["shift"] == "night") & (df["actual_qty"] > 0)].copy()
+    night_df["takt_min"] = SHIFT_MINUTES / night_df["actual_qty"]
+    _print_stats(_summary_stats(night_df["takt_min"], "(B) Whole-line takt — night shift (min/unit)"), out_lines)
+
+    # Model batch-size interpretation
+    mu_total = 150.0  # mu_A + mu_B in current model (min/job)
+    median_takt_day = day_df["takt_min"].median()
+    batch_correct   = mu_total / median_takt_day
+    batch_wrong     = mu_total / shift_df[shift_df["shift"]=="day"]["implied_ct_min"].median()
+    batch_section = (
+        f"\n  Model batch-size interpretation (mu_A + mu_B = {mu_total:.0f} min/job):\n"
+        f"    Using whole-line takt ({median_takt_day:.2f} min/unit):  "
+        f"{batch_correct:.0f} units/job  [CORRECT]\n"
+        f"    Using per-worker C/T  ({shift_df[shift_df['shift']=='day']['implied_ct_min'].median():.2f} min/unit): "
+        f"{batch_wrong:.0f} units/job  [understated — do not use for scale interpretation]\n"
+        f"\n"
+        f"  At 50 model jobs over 20 weekdays (2.5 jobs/day):\n"
+        f"    Approx. {50 * batch_correct:.0f} total units  (~{2.5 * batch_correct:.0f} units/day)\n"
+        f"    Factory target: 1,200 units/day  =>  model runs at ~"
+        f"{100 * 2.5 * batch_correct / 1200:.0f}% of factory scale\n"
+        f"  To match factory scale (~1,200 units/day) would require ~"
+        f"{int(1200 / batch_correct + 0.5)} model jobs/day  =>  "
+        f"~{int(20 * 1200 / batch_correct + 0.5)} jobs over 20 days"
+    )
+    print(batch_section)
+    out_lines.append(batch_section)
 
     # ------------------------------------------------------------------
     # Monthly breakdown
@@ -549,24 +617,24 @@ def analyse_machine_trouble(df: pd.DataFrame, out_lines: list[str]) -> None:
     # ------------------------------------------------------------------
     # MachineStopConfig parameter estimation
     # ------------------------------------------------------------------
-    # The trouble log records:
-    #   - stoppage_count_total : number of micro-stop events in one operating day
-    #   - total_lost_time_min  : total minutes lost to all stops
+    # The trouble log records total lost time including long-duration events.
+    # Long-duration events (single large incidents) should NOT be folded into
+    # the micro-stop parameters — they are a separate disruption mechanism.
     #
-    # Current simulation model uses:
-    #   inter-arrival time ~ Exponential(mean = mean_uptime_between_stops)
-    #   stop duration      ~ Gamma(shape, scale) with mean = mean_stop_duration
+    # Correct approach:
+    #   micro_stop_lost  = total_lost_time_min - long_duration_loss_min
+    #   mean_stop_dur    = micro_stop_lost / stoppage_count_total
+    #   effective_run    = SHIFT_MINUTES * 2 - micro_stop_lost  (two shifts)
+    #   mean_uptime      = effective_run / stoppage_count_total
     #
-    # Approximation approach:
-    #   mean_stop_duration        ≈ total_lost_time_min / stoppage_count_total
-    #   effective_run_time        ≈ SHIFT_MINUTES * 2 - total_lost_time_min
-    #                                (two shifts per day)
-    #   mean_uptime_between_stops ≈ effective_run_time / stoppage_count_total
+    # Using total_lost_time (including long-duration) would inflate
+    # mean_stop_duration and compress mean_uptime incorrectly.
     # ------------------------------------------------------------------
     param_section = (
-        "\n--- MachineStopConfig parameter estimates ---\n"
-        "  (These are approximations from aggregated daily data.\n"
-        "   Per-incident timestamps are not available in this dataset.)"
+        "\n--- MachineStopConfig parameter estimates (micro-stops only) ---\n"
+        "  Long-duration events are excluded from these estimates.\n"
+        "  Per-incident timestamps are not available — these are approximations\n"
+        "  from aggregated daily totals."
     )
     print(param_section)
     out_lines.append(param_section)
@@ -576,34 +644,44 @@ def analyse_machine_trouble(df: pd.DataFrame, out_lines: list[str]) -> None:
         (df["total_lost_time_min"]  > 0)
     ].copy()
 
-    # Estimated mean stop duration per incident (minutes)
-    valid["est_mean_stop_dur"] = valid["total_lost_time_min"] / valid["stoppage_count_total"]
+    # Micro-stop-only lost time (strip long-duration events)
+    valid["micro_lost"] = (
+        valid["total_lost_time_min"] - valid["long_duration_loss_min"].fillna(0)
+    ).clip(lower=0)
 
-    # Estimated run time per day (both shifts minus lost time)
-    valid["est_run_time"] = (SHIFT_MINUTES * 2) - valid["total_lost_time_min"]
-    valid["est_mean_uptime"] = valid["est_run_time"] / valid["stoppage_count_total"]
+    # Only use days where micro-stop lost time is positive
+    valid = valid[valid["micro_lost"] > 0].copy()
 
-    overall_mean_stop_dur  = valid["est_mean_stop_dur"].mean()
+    valid["est_mean_stop_dur"] = valid["micro_lost"] / valid["stoppage_count_total"]
+    valid["est_run_time"]      = (SHIFT_MINUTES * 2) - valid["micro_lost"]
+    valid["est_mean_uptime"]   = valid["est_run_time"] / valid["stoppage_count_total"]
+
+    overall_mean_stop_dur   = valid["est_mean_stop_dur"].mean()
     overall_median_stop_dur = valid["est_mean_stop_dur"].median()
-    overall_mean_uptime    = valid["est_mean_uptime"].mean()
-    overall_median_uptime  = valid["est_mean_uptime"].median()
+    overall_mean_uptime     = valid["est_mean_uptime"].mean()
+    overall_median_uptime   = valid["est_mean_uptime"].median()
 
     param_lines = [
+        f"  Micro-stop lost time (excl. long-duration events):",
+        f"    mean={valid['micro_lost'].mean():.1f} min/day  "
+        f"median={valid['micro_lost'].median():.1f} min/day  (n={len(valid)} days)",
         f"  Estimated mean stop duration:          mean={overall_mean_stop_dur:.2f} min  "
-        f"median={overall_median_stop_dur:.2f} min  (n={len(valid)} days)",
+        f"median={overall_median_stop_dur:.2f} min",
         f"  Estimated mean uptime between stops:   mean={overall_mean_uptime:.2f} min  "
         f"median={overall_median_uptime:.2f} min",
-        f"\n  Suggested MachineStopConfig values (use with caution — aggregate data only):",
-        f"    mean_stop_duration        = {overall_mean_stop_dur:.1f}",
-        f"    mean_uptime_between_stops = {overall_mean_uptime:.1f}",
-        f"  (Current defaults: mean_stop_duration=8.0, mean_uptime_between_stops=68.57)",
+        f"\n  Suggested MachineStopConfig values (micro-stop layer only):",
+        f"    mean_stop_duration        = {overall_median_stop_dur:.2f}  (median; mean={overall_mean_stop_dur:.2f})",
+        f"    mean_uptime_between_stops = {overall_median_uptime:.2f}  (median; mean={overall_mean_uptime:.2f})",
+        f"  Previous defaults: mean_stop_duration=8.0, mean_uptime_between_stops=68.57",
+        f"  Note: median is preferred over mean here because a few high-lost-time",
+        f"        days skew the mean upward.",
     ]
     for line in param_lines:
         print(line)
         out_lines.append(line)
 
-    _print_stats(_summary_stats(valid["est_mean_stop_dur"],  "Per-day est. mean stop duration (min)"), out_lines)
-    _print_stats(_summary_stats(valid["est_mean_uptime"],    "Per-day est. mean uptime between stops (min)"), out_lines)
+    _print_stats(_summary_stats(valid["est_mean_stop_dur"],  "Per-day est. mean stop duration (min, micro only)"), out_lines)
+    _print_stats(_summary_stats(valid["est_mean_uptime"],    "Per-day est. mean uptime between stops (min, micro only)"), out_lines)
 
     # Monthly breakdown
     monthly_section = "\n--- Monthly breakdown ---"
@@ -1125,7 +1203,12 @@ def plot_machinestop_calibration(
     """
     _apply_base_style()
     df = trouble_df.copy()
-    df["micro_stop_lost"]  = (df["total_lost_time_min"] - df["long_duration_loss_min"]).clip(lower=0)
+    # Use micro-stop-only lost time (strip long-duration events) — consistent
+    # with the parameter estimation in analyse_machine_trouble.
+    # Long-duration events inflate mean_stop_duration if included.
+    df["micro_stop_lost"] = (
+        df["total_lost_time_min"] - df["long_duration_loss_min"].fillna(0)
+    ).clip(lower=0)
     valid = df[(df["stoppage_count_total"] > 0) & (df["micro_stop_lost"] > 0)].copy()
 
     valid["est_stop_dur"]  = valid["micro_stop_lost"] / valid["stoppage_count_total"]
