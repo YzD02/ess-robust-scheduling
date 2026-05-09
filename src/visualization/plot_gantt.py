@@ -17,6 +17,8 @@ def load_event_log(csv_path: str) -> pd.DataFrame:
         'start_time_day', 'end_time_day', 'start_time_global',
         'end_time_global', 'duration', 'from_backlog'
     }
+    # shift_index is present in two-shift runs (0=day, 1=night); optional for
+    # backward compatibility with single-shift event logs.
     missing = required_cols - set(df.columns)
     if missing:
         raise ValueError(f'Missing required columns in event log CSV: {sorted(missing)}')
@@ -37,8 +39,11 @@ def extract_maintenance_windows(df: pd.DataFrame) -> dict[int, tuple[float, floa
 
 
 def build_merged_job_blocks(df: pd.DataFrame) -> pd.DataFrame:
+    group_cols = ['executed_day', 'day_type', 'job_id', 'planned_day']
+    if 'shift_index' in df.columns:
+        group_cols = ['executed_day', 'shift_index', 'day_type', 'job_id', 'planned_day']
     agg_df = (
-        df.groupby(['executed_day', 'day_type', 'job_id', 'planned_day'], as_index=False)
+        df.groupby(group_cols, as_index=False)
         .agg(
             start_time_day=('start_time_day', 'min'),
             end_time_day=('end_time_day', 'max'),
@@ -50,7 +55,8 @@ def build_merged_job_blocks(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
     agg_df['duration'] = agg_df['end_time_day'] - agg_df['start_time_day']
-    return agg_df.sort_values(['executed_day', 'start_time_day', 'job_id']).reset_index(drop=True)
+    sort_cols = ['executed_day', 'shift_index', 'start_time_day', 'job_id']         if 'shift_index' in agg_df.columns else ['executed_day', 'start_time_day', 'job_id']
+    return agg_df.sort_values(sort_cols).reset_index(drop=True)
 
 
 def get_job_colors(job_ids):
@@ -61,15 +67,27 @@ def get_job_colors(job_ids):
 
 def build_lane_order_detailed(df: pd.DataFrame) -> list[str]:
     lanes = []
+    has_shift = 'shift_index' in df.columns
     for d in sorted(df['executed_day'].unique()):
-        lanes.append(f'Day {int(d)} - Station A')
-        lanes.append(f'Day {int(d)} - Station B')
+        if has_shift:
+            for s in sorted(df[df['executed_day'] == d]['shift_index'].unique()):
+                shift_label = 'Day' if s == 0 else 'Night'
+                lanes.append(f'Day {int(d)} {shift_label} - Station A')
+                lanes.append(f'Day {int(d)} {shift_label} - Station B')
+        else:
+            lanes.append(f'Day {int(d)} - Station A')
+            lanes.append(f'Day {int(d)} - Station B')
     return lanes
 
 
 def plot_detailed_global(df: pd.DataFrame, out_path: str | None = None):
     df = df.copy()
-    df['lane'] = df.apply(lambda r: f"Day {int(r['executed_day'])} - Station {r['station']}", axis=1)
+    if 'shift_index' in df.columns:
+        df['shift_label'] = df['shift_index'].map({0: 'Day', 1: 'Night'})
+        df['lane'] = df.apply(
+            lambda r: f"Day {int(r['executed_day'])} {r['shift_label']} - Station {r['station']}", axis=1)
+    else:
+        df['lane'] = df.apply(lambda r: f"Day {int(r['executed_day'])} - Station {r['station']}", axis=1)
     lanes = build_lane_order_detailed(df)
     lane_to_y = {lane: i for i, lane in enumerate(lanes)}
     job_to_color = get_job_colors(df['job_id'].tolist())
@@ -114,7 +132,12 @@ def plot_detailed_global(df: pd.DataFrame, out_path: str | None = None):
 
 def plot_merged_shift(df: pd.DataFrame, out_path: str | None = None):
     merged = build_merged_job_blocks(df)
-    merged['lane'] = merged.apply(lambda r: f"Day {int(r['executed_day'])} ({r['day_type']})", axis=1)
+    if 'shift_index' in merged.columns:
+        merged['shift_label'] = merged['shift_index'].map({0: 'Day', 1: 'Night'})
+        merged['lane'] = merged.apply(
+            lambda r: f"Day {int(r['executed_day'])} {r['shift_label']} ({r['day_type']})", axis=1)
+    else:
+        merged['lane'] = merged.apply(lambda r: f"Day {int(r['executed_day'])} ({r['day_type']})", axis=1)
     lanes = merged['lane'].drop_duplicates().tolist()
     lane_to_y = {lane: i for i, lane in enumerate(lanes)}
     job_to_color = get_job_colors(merged['job_id'].tolist())
@@ -123,9 +146,14 @@ def plot_merged_shift(df: pd.DataFrame, out_path: str | None = None):
     fig_height = max(6, len(lanes) * 0.55)
     fig, ax = plt.subplots(figsize=(22, fig_height))
 
-    for _, row in merged.drop_duplicates(subset=['executed_day', 'day_type']).iterrows():
+    for _, row in merged.drop_duplicates(subset=['executed_day', 'day_type'] + (['shift_index'] if 'shift_index' in merged.columns else [])).iterrows():
         executed_day = int(row['executed_day'])
-        lane = f"Day {executed_day} ({row['day_type']})"
+        # Only render maintenance on day shift (shift_index=0) or single-shift mode
+        if 'shift_index' in merged.columns and int(row['shift_index']) != 0:
+            continue
+        lane = row['lane']
+        if lane not in lane_to_y:
+            continue
         y = lane_to_y[lane]
         if executed_day in maintenance_map:
             m_start, m_end = maintenance_map[executed_day]
@@ -175,17 +203,22 @@ def calendar_label(executed_day: int, day_type: str, weekday_horizon_days: int =
 
 
 def build_calendar_lane_order(merged: pd.DataFrame, weekday_horizon_days: int = 20) -> list[str]:
-    used_labels = set(merged.apply(lambda r: calendar_label(int(r['executed_day']), str(r['day_type']), weekday_horizon_days), axis=1).tolist())
+    used_labels = set(merged['lane'].tolist())
+    has_shift = 'shift_index' in merged.columns
     lanes = []
     n_weeks = weekday_horizon_days // 5
+    shift_suffixes = [' Day', ' Night'] if has_shift else ['']
     for w in range(1, n_weeks + 1):
         for wd in range(1, 6):
-            label = f'Week {w} - WD{wd}'
-            if label in used_labels:
-                lanes.append(label)
-        sat = f'Week {w} - Sat'; sun = f'Week {w} - Sun'
-        if sat in used_labels: lanes.append(sat)
-        if sun in used_labels: lanes.append(sun)
+            for suf in shift_suffixes:
+                label = f'Week {w} - WD{wd}{suf}'
+                if label in used_labels:
+                    lanes.append(label)
+        for weekend in ['Sat', 'Sun']:
+            for suf in shift_suffixes:
+                label = f'Week {w} - {weekend}{suf}'
+                if label in used_labels:
+                    lanes.append(label)
     for label in sorted(used_labels):
         if label not in lanes:
             lanes.append(label)
@@ -194,7 +227,14 @@ def build_calendar_lane_order(merged: pd.DataFrame, weekday_horizon_days: int = 
 
 def plot_merged_calendar(df: pd.DataFrame, out_path: str | None = None, weekday_horizon_days: int = 20):
     merged = build_merged_job_blocks(df)
-    merged['lane'] = merged.apply(lambda r: calendar_label(int(r['executed_day']), str(r['day_type']), weekday_horizon_days), axis=1)
+    if 'shift_index' in merged.columns:
+        merged['shift_label'] = merged['shift_index'].map({0: 'Day', 1: 'Night'})
+        merged['lane'] = merged.apply(
+            lambda r: calendar_label(int(r['executed_day']), str(r['day_type']), weekday_horizon_days)
+                      + f" {r['shift_label']}", axis=1)
+    else:
+        merged['lane'] = merged.apply(
+            lambda r: calendar_label(int(r['executed_day']), str(r['day_type']), weekday_horizon_days), axis=1)
     lanes = build_calendar_lane_order(merged, weekday_horizon_days=weekday_horizon_days)
     lane_to_y = {lane: i for i, lane in enumerate(lanes)}
     job_to_color = get_job_colors(merged['job_id'].tolist())
@@ -203,9 +243,12 @@ def plot_merged_calendar(df: pd.DataFrame, out_path: str | None = None, weekday_
     fig_height = max(7, len(lanes) * 0.55)
     fig, ax = plt.subplots(figsize=(22, fig_height))
 
-    for _, row in merged.drop_duplicates(subset=['executed_day', 'day_type']).iterrows():
+    for _, row in merged.drop_duplicates(subset=['executed_day', 'day_type'] + (['shift_index'] if 'shift_index' in merged.columns else [])).iterrows():
         executed_day = int(row['executed_day'])
-        lane = calendar_label(executed_day, str(row['day_type']), weekday_horizon_days)
+        # Only render maintenance on day shift (shift_index=0) or single-shift mode
+        if 'shift_index' in merged.columns and int(row['shift_index']) != 0:
+            continue
+        lane = row['lane']
         if lane not in lane_to_y:
             continue
         y = lane_to_y[lane]
