@@ -26,16 +26,29 @@ Gaussian noise.
 Station B (manual harness alignment / riveting) retains a Gaussian model
 because human-side variability is well approximated by a normal distribution.
 
+Two-shift execution model
+--------------------------
+Each calendar day is divided into two consecutive 480-minute shifts:
+
+  Day shift   (shift_index=0): runs first, 0–480 min within the calendar day.
+  Night shift (shift_index=1): runs second, 480–960 min within the calendar day.
+
+Backlog from the day shift feeds directly into the night shift of the same
+calendar day.  Backlog remaining after the night shift carries to the next
+calendar day.  A job is always non-preemptive — it either completes fully
+within a 480-minute shift window or rolls to the next shift as backlog.
+
 Main execution rules
 --------------------
-1. The planning model assigns jobs to weekday bins only.
-2. In execution, each day has only ``regular_shift`` minutes available.
-3. No same-day overtime is allowed; unfinished jobs roll to the next day.
-4. A weekly 2-hour maintenance window is scheduled at a random time.
-   If starting a job would overlap the maintenance window, the job is
-   deferred until maintenance ends.
-5. After all weekdays are exhausted, optional weekend extension bins absorb
-   any remaining backlog.
+1. The planning model assigns jobs to calendar-day bins (20 weekdays).
+   Each day bin has capacity = shifts_per_day * regular_shift (960 min).
+2. In execution, each shift has ``regular_shift`` (480) minutes available.
+   Jobs cannot span the shift boundary.
+3. No same-shift overtime; unfinished jobs roll to the next shift.
+4. A weekly 2-hour maintenance window is assigned to one shift per week.
+   It always falls within the day shift of the chosen day.
+5. After all weekdays are exhausted, optional weekend extension days absorb
+   any remaining backlog.  Each weekend day also runs two shifts.
 """
 
 import random
@@ -59,12 +72,14 @@ class SimulationPolicy:
     weekend_fixed_cost: float = 300.0
     weekend_variable_cost: float = 8.0
     maintenance_duration: float = 120.0
+    shifts_per_day: int = 2  # number of consecutive shifts per calendar day
 
 
 @dataclass
 class DayExecutionResult:
     day_index: int
     day_type: str
+    shift_index: int          # 0 = day shift, 1 = night shift
     planned_jobs: List[int]
     backlog_jobs_in: List[int]
     realized_queue: List[int]
@@ -177,9 +192,10 @@ def generate_daily_maintenance_windows(
 
     Notes
     -----
-    The start time within the chosen day is always drawn uniformly at
-    random from [0, shift_length - maintenance_duration], regardless of
-    which policy is active.
+    Maintenance windows are always assigned to the **day shift** (shift_index=0)
+    of the chosen calendar day.  The start time within that shift is drawn
+    uniformly at random from [0, shift_length - maintenance_duration].
+    Night shifts are maintenance-free.
     """
     if unscheduled_weeks_policy not in ('random', 'skip'):
         raise ValueError(
@@ -320,6 +336,7 @@ def execute_one_day_with_backlog(
     day_index: int,
     day_type: str,
     backlog_jobs: List[int],
+    shift_index: int,
     planned_jobs: List[int],
     policy: SimulationPolicy,
     planned_day_map: Dict[int, int],
@@ -332,18 +349,24 @@ def execute_one_day_with_backlog(
     maintenance_end_day: float | None = None,
     simulation_run: int = 1,
 ) -> DayExecutionResult:
-    """Simulate execution for a single day, respecting backlog priority and maintenance.
+    """Simulate execution for a single 480-minute shift window.
 
     Execution rules
     ---------------
-    1. Backlog jobs (carried over from previous days) are processed first.
+    1. Backlog jobs (carried over from the previous shift) are processed first.
     2. Planned jobs follow in shortest-robust-time-first order.
-    3. Jobs are non-preemptive: a job either completes in full during this
-       shift or is pushed entirely to the next day — no splitting.
-    4. If a job would overlap the maintenance window, its start is pushed
-       to the end of maintenance.
-    5. No overtime: the shift ends at ``policy.regular_shift`` minutes.
-       Any jobs remaining at that point go into tomorrow's backlog.
+       Planned jobs are only injected at the start of the day shift
+       (shift_index=0); the night shift only processes backlog.
+    3. Jobs are non-preemptive: a job completes in full during this
+       480-minute window or rolls to the next shift as backlog.
+       A job can never span the day/night shift boundary.
+    4. Maintenance only applies to the day shift (shift_index=0).
+       If a job would overlap the window, its start is deferred.
+    5. No overtime: any jobs remaining at shift end go to next shift.
+
+    Parameters
+    ----------
+    shift_index : 0 for day shift, 1 for night shift.
     """
     # Backlog jobs always go first — they have been waiting longest.
     queue_today = list(backlog_jobs) + list(planned_jobs)
@@ -421,6 +444,7 @@ def execute_one_day_with_backlog(
                 'simulation_run': simulation_run,
                 'planned_day': planned_day,
                 'executed_day': executed_day,
+                'shift_index': shift_index,
                 'day_type': day_type,
                 'job_id': job_id,
                 'from_backlog': from_backlog,
@@ -459,6 +483,7 @@ def execute_one_day_with_backlog(
     return DayExecutionResult(
         day_index=day_index,
         day_type=day_type,
+        shift_index=shift_index,
         planned_jobs=list(planned_jobs),
         backlog_jobs_in=list(backlog_jobs),
         realized_queue=list(queue_today),
@@ -569,66 +594,94 @@ def simulate_horizon_with_backlog(
     weekend_days_used: List[int] = []
     weekend_used_time = 0.0
 
-    # ---- Phase 1: work through all planned weekdays ----
+    def _run_calendar_day(
+        cal_day: int,
+        day_type: str,
+        planned: list,
+        maint_window: tuple,
+    ):
+        """Run both shifts of one calendar day, returning per-shift results.
+
+        Day shift (shift_index=0) runs first with planned jobs and maintenance.
+        Night shift (shift_index=1) runs second with whatever backlog remains
+        from the day shift.  Planned jobs are NEVER injected into the night
+        shift — they only enter via the day-shift execution.
+        """
+        nonlocal backlog, max_backlog
+        shift_results = []
+
+        for s_idx in range(policy.shifts_per_day):
+            is_day_shift = (s_idx == 0)
+            # Planned jobs only flow in on the day shift
+            shift_planned = list(planned) if is_day_shift else []
+            # Maintenance only on day shift
+            m_start = maint_window[0] if is_day_shift else None
+            m_end   = maint_window[1] if is_day_shift else None
+
+            shift_result = execute_one_day_with_backlog(
+                day_index=cal_day,
+                day_type=day_type,
+                shift_index=s_idx,
+                backlog_jobs=backlog,
+                planned_jobs=shift_planned,
+                policy=policy,
+                planned_day_map=planned_day_map,
+                mu_A=mu_A,
+                mu_B=mu_B,
+                low_B=low_B,
+                high_B=high_B,
+                stop_cfg=stop_cfg,
+                maintenance_start_day=m_start,
+                maintenance_end_day=m_end,
+                simulation_run=simulation_run,
+            )
+            shift_results.append(shift_result)
+            full_event_log.extend(shift_result.event_log)
+            backlog = shift_result.unfinished_sequence
+            max_backlog = max(max_backlog, len(backlog))
+
+        return shift_results
+
+    # ---- Phase 1: work through all planned weekdays (two shifts each) ----
     for day in all_weekdays:
         m_window = _maintenance_map.get(day, (None, None))
-        day_result = execute_one_day_with_backlog(
-            day_index=day,
+        shift_results = _run_calendar_day(
+            cal_day=day,
             day_type='weekday',
-            backlog_jobs=backlog,
-            planned_jobs=schedule_dict.get(day, []),
-            policy=policy,
-            planned_day_map=planned_day_map,
-            mu_A=mu_A,
-            mu_B=mu_B,
-            low_B=low_B,
-            high_B=high_B,
-            stop_cfg=stop_cfg,
-            maintenance_start_day=m_window[0],
-            maintenance_end_day=m_window[1],
-            simulation_run=simulation_run,
+            planned=schedule_dict.get(day, []),
+            maint_window=m_window,
         )
-        outputs[day] = day_result
-        full_event_log.extend(day_result.event_log)
-        backlog = day_result.unfinished_sequence
-        max_backlog = max(max_backlog, len(backlog))
-        if day_result.backlog_end_of_day > 0:
+        # Store both shift results; key = (day, shift_index)
+        for sr in shift_results:
+            outputs[(day, sr.shift_index)] = sr
+        # Spillover flag: if the night shift (last shift) still has backlog
+        night_shift_result = shift_results[-1]
+        if night_shift_result.backlog_end_of_day > 0:
             spillover_days.append(day)
 
     cleared_within_weekdays = len(backlog) == 0
 
-    # ---- Phase 2: weekend recovery (only if backlog remains) ----
-    # Weekend days have no maintenance and no planned jobs — they exist purely
-    # to absorb leftover backlog.  We stop as soon as backlog hits zero.
+    # ---- Phase 2: weekend recovery (two shifts per weekend day) ----
     first_weekend_day = policy.weekday_horizon_days + 1
     last_weekend_day = policy.weekday_horizon_days + policy.weekend_extension_days
     for day in range(first_weekend_day, last_weekend_day + 1):
         if len(backlog) == 0:
             break
-        day_result = execute_one_day_with_backlog(
-            day_index=day,
+        shift_results = _run_calendar_day(
+            cal_day=day,
             day_type='weekend',
-            backlog_jobs=backlog,
-            planned_jobs=[],
-            policy=policy,
-            planned_day_map=planned_day_map,
-            mu_A=mu_A,
-            mu_B=mu_B,
-            low_B=low_B,
-            high_B=high_B,
-            stop_cfg=stop_cfg,
-            maintenance_start_day=None,
-            maintenance_end_day=None,
-            simulation_run=simulation_run,
+            planned=[],
+            maint_window=(None, None),
         )
-        outputs[day] = day_result
-        full_event_log.extend(day_result.event_log)
-        backlog = day_result.unfinished_sequence
-        max_backlog = max(max_backlog, len(backlog))
-        if day_result.weekend_day_used:
+        for sr in shift_results:
+            outputs[(day, sr.shift_index)] = sr
+        # Track weekend usage: count calendar day if any shift was used
+        day_used = any(sr.weekend_day_used or sr.used_time > 0 for sr in shift_results)
+        if day_used:
             weekend_days_used.append(day)
-            weekend_used_time += day_result.used_time
-        if day_result.backlog_end_of_day > 0:
+            weekend_used_time += sum(sr.used_time for sr in shift_results)
+        night_shift_result = shift_results[-1]
+        if night_shift_result.backlog_end_of_day > 0:
             spillover_days.append(day)
 
     # ---- Summarise the full horizon outcome ----
@@ -639,9 +692,17 @@ def simulate_horizon_with_backlog(
     weekend_variable_cost = weekend_used_time * policy.weekend_variable_cost
     total_weekend_cost = weekend_fixed_cost + weekend_variable_cost
     final_completion_day = max((int(r['executed_day']) for r in full_event_log), default=None)
+    # Build a calendar-day-level view (merging both shifts) for downstream use
+    all_cal_days = sorted({k[0] for k in outputs.keys()})
+    cal_day_outputs = {}
+    for cal_day in all_cal_days:
+        day_shifts = [outputs[(cal_day, s)] for s in range(policy.shifts_per_day)
+                      if (cal_day, s) in outputs]
+        # Aggregate key metrics across shifts for this calendar day
+        cal_day_outputs[cal_day] = day_shifts
 
     return HorizonExecutionResult(
-        days=outputs,
+        days=outputs,          # keyed by (calendar_day, shift_index)
         planned_day_map=planned_day_map,
         maintenance_map=_maintenance_map,
         terminal_backlog_jobs=terminal_backlog_jobs,
@@ -745,6 +806,7 @@ def monte_carlo_breakdown_analysis(
     weekend_used_time_list: List[float] = []
     total_weekend_cost_list: List[float] = []
     final_completion_day_list: List[int] = []
+    # Track per-calendar-day end-of-day backlog (after both shifts complete)
     day_backlog_end = {day: [] for day in schedule_dict}
 
     for r in range(n_replications):
@@ -775,7 +837,11 @@ def monte_carlo_breakdown_analysis(
         if out.final_completion_day is not None:
             final_completion_day_list.append(out.final_completion_day)
         for day in schedule_dict:
-            day_backlog_end[day].append(out.days[day].backlog_end_of_day if day in out.days else 0)
+            # Use the night shift (last shift) end-of-day backlog for this calendar day
+            night_key = (day, policy.shifts_per_day - 1)
+            day_backlog_end[day].append(
+                out.days[night_key].backlog_end_of_day if night_key in out.days else 0
+            )
 
     summary: Dict[str, Any] = {
         'prob_terminal_backlog_after_extension': sum(1 for x in terminal_backlog_list if x > 0) / n_replications,
