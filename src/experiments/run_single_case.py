@@ -181,11 +181,11 @@ def main():
     sigma_B = generated['sigma_B']  # derived from triangular params; used in planning layer only
 
     # Gurobi model parameters
-    C_std = 480.0        # regular shift capacity per day (8 hours × 60 minutes)
+    C_std = 960.0        # two-shift daily capacity: 2 × 480 min = 960 min
     Cost_OT = 5.0        # cost per overtime minute (used to penalise overtime usage)
     Cost_fix = 180.0     # fixed cost for activating overtime on any given day
-    M = 2000.0           # big-M constant for the overtime activation constraint
-    time_limit_sec = 120.0  # practical solver time limit for quick presentation runs (2 minutes)
+    M = 50000.0          # big-M: must exceed max possible daily load (n_jobs × max_p_robust)
+    time_limit_sec = 120.0  # 2 min for local testing; use 7200 for cluster runs
 
     p_nominal, p_robust = compute_robust_processing_times(
         mu_A=mu_A,
@@ -197,12 +197,13 @@ def main():
 
     # Simulation execution policy
     policy = SimulationPolicy(
-        regular_shift=480.0,          # available minutes per working day
-        weekday_horizon_days=20,      # number of planned weekdays (4 weeks)
+        regular_shift=480.0,          # one shift window (minutes) — jobs cannot cross this boundary
+        weekday_horizon_days=20,      # number of planned calendar days (4 weeks)
         weekend_extension_days=8,     # extra weekend days available if backlog remains
         weekend_fixed_cost=300.0,     # cost to open one weekend recovery day
         weekend_variable_cost=8.0,    # cost per minute used on a weekend day
         maintenance_duration=120.0,   # planned maintenance window per week (minutes)
+        shifts_per_day=2,             # day shift + night shift per calendar day
     )
 
     # -----------------------------------------------------------------------
@@ -286,8 +287,8 @@ def main():
 
     day_rows = []
     first_overflow_day = None
-    for day in sorted(one_run.days.keys()):
-        d = one_run.days[day]
+    for (day, shift_idx) in sorted(one_run.days.keys()):
+        d = one_run.days[(day, shift_idx)]
         planned_nominal_load = sum(p_nominal[j] for j in d.planned_jobs) if d.planned_jobs else 0.0
         planned_robust_load = sum(p_robust[j] for j in d.planned_jobs) if d.planned_jobs else 0.0
         backlog_nominal_load = sum(p_nominal[j] for j in d.backlog_jobs_in) if d.backlog_jobs_in else 0.0
@@ -295,11 +296,15 @@ def main():
         realized_executed_load = sum(detail['total_time'] for detail in d.job_details.values()) if d.job_details else 0.0
         capacity = policy.regular_shift
         slack = capacity - realized_executed_load
-        overflow_flag = d.backlog_end_of_day > 0
+        # Overflow = end of night shift still has backlog
+        overflow_flag = (shift_idx == policy.shifts_per_day - 1) and d.backlog_end_of_day > 0
         if overflow_flag and first_overflow_day is None:
             first_overflow_day = day
+        shift_label = 'day' if shift_idx == 0 else 'night'
         day_rows.append({
             'day': day,
+            'shift_index': shift_idx,
+            'shift_label': shift_label,
             'day_type': d.day_type,
             'planned_jobs': str(d.planned_jobs),
             'backlog_jobs_in': str(d.backlog_jobs_in),
@@ -363,8 +368,10 @@ def main():
         'k': k,
         'n_replications': n_replications,
         'job_abstraction': 'batch_level_workload_not_one_physical_unit',
-        'ct_proxy_min_per_unit_median': 2.34,
-        'approx_units_per_model_job': 64,
+        'ct_proxy_whole_line_takt_min_per_unit': 0.78,
+        'approx_units_per_model_job': 192,
+        'shifts_per_day': policy.shifts_per_day,
+        'daily_capacity_min': C_std,
         'mean_uptime_between_stops': stop_cfg.mean_uptime_between_stops,
         'mean_stop_duration': stop_cfg.mean_stop_duration,
         'stop_duration_cv': stop_cfg.stop_duration_cv,

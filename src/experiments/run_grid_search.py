@@ -11,11 +11,11 @@ This version keeps the batch-level job abstraction and updates the machine-stop
 layer using Jan-Apr factory EDA.  It is intentionally smaller than the earlier
 large stress grid so the results can be generated quickly for presentation.
 
-Default quick grid
-------------------
-  n_jobs: 20,30,40,50
+Default grid (factory-scale)
+----------------------------
+  n_jobs: 75,100,125,150   (two-shift model, 960 min/day capacity)
   k:      0.5,1.0,1.5
-  reps:   20
+  reps:   20  (local); 100 (cluster)
 
 How to run
 ----------
@@ -156,12 +156,13 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
     # Build policy here so maintenance_duration is available for the row dict
     # regardless of whether simulation runs.
     policy = SimulationPolicy(
-        regular_shift=480.0,
+        regular_shift=480.0,          # one shift window — jobs cannot cross this boundary
         weekday_horizon_days=weekday_days,
         weekend_extension_days=weekend_extension_days,
         weekend_fixed_cost=weekend_fixed_cost,
         weekend_variable_cost=weekend_variable_cost,
         maintenance_duration=120.0,
+        shifts_per_day=2,             # day shift + night shift per calendar day
     )
     # Data-informed micro-stop layer from Jan-Apr Automation Results.
     # Median values are used to reduce the influence of outlier days.
@@ -180,8 +181,10 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         'sigma_scale': sigma_scale,
         'k': k,
         'job_abstraction': 'batch_level_workload_not_one_physical_unit',
-        'ct_proxy_min_per_unit_median': 2.34,
-        'approx_units_per_model_job': 64,
+        'ct_proxy_whole_line_takt_min_per_unit': 0.78,
+        'approx_units_per_model_job': 192,
+        'shifts_per_day': policy.shifts_per_day,
+        'daily_capacity_min': C_std,
         'mean_uptime_between_stops': stop_cfg.mean_uptime_between_stops,
         'mean_stop_duration': stop_cfg.mean_stop_duration,
         'stop_duration_cv': stop_cfg.stop_duration_cv,
@@ -253,7 +256,7 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
 
 def main():
     parser = argparse.ArgumentParser(description='Run weekend-extension grid search with maintenance-aware execution.')
-    parser.add_argument('--n-values', type=str, default='20,30,40,50', help='Comma-separated batch-job counts.')
+    parser.add_argument('--n-values', type=str, default='75,100,125,150', help='Comma-separated batch-job counts.')
     parser.add_argument('--mu-scales', type=str, default='1.0', help='Comma-separated mu scaling factors.')
     parser.add_argument('--sigma-scales', type=str, default='1.0', help='Comma-separated sigma scaling factors.')
     parser.add_argument('--k-values', type=str, default='0.5,1.0,1.5', help='Comma-separated k values.')
@@ -263,7 +266,7 @@ def main():
     parser.add_argument('--weekend-extension-days', type=int, default=8, help='Number of weekend extension bins available in simulation.')
     parser.add_argument('--weekend-fixed-cost', type=float, default=300.0, help='Fixed cost for activating one weekend extension day.')
     parser.add_argument('--weekend-variable-cost', type=float, default=8.0, help='Variable cost per minute used in a weekend extension day.')
-    parser.add_argument('--gurobi-time-limit-sec', type=float, default=120.0, help='Maximum solve time for Gurobi.')
+    parser.add_argument('--gurobi-time-limit-sec', type=float, default=120.0, help='Max solve time for Gurobi (seconds). Use 120 for local tests, 7200 for cluster runs.')
     parser.add_argument('--seed', type=int, default=42, help='Base random seed.')
     parser.add_argument('--output-flag', type=int, default=0, help='Gurobi OutputFlag (0 or 1).')
     parser.add_argument(
@@ -328,10 +331,10 @@ def main():
                         random_seed=args.seed,
                         weekday_days=args.weekday_days,
                         weekend_extension_days=args.weekend_extension_days,
-                        C_std=480.0,
+                        C_std=960.0,        # two-shift daily capacity
                         Cost_OT=5.0,
                         Cost_fix=180.0,
-                        M=2000.0,
+                        M=50000.0,          # big-M: must exceed max possible daily load
                         gurobi_time_limit_sec=args.gurobi_time_limit_sec,
                         weekend_fixed_cost=args.weekend_fixed_cost,
                         weekend_variable_cost=args.weekend_variable_cost,
