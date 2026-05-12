@@ -308,7 +308,7 @@ def main():
     parser.add_argument(
         "--csv",
         type=str,
-        default="results/grid_search/grid_search_results_weekend_extension.csv",
+        default="results/grid_search/grid_search_results_two_shift_v2.csv",
         help="Path to weekend-extension grid search CSV.",
     )
     parser.add_argument(
