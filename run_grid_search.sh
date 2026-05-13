@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=def-cglee
-#SBATCH --time=16:00:00
+#SBATCH --time=10:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
