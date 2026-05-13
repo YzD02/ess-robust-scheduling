@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=def-cglee
-#SBATCH --time=4:00:00
+#SBATCH --time=16:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -19,13 +19,13 @@ python -m src.experiments.run_grid_search \
     --replications 100 \
     --maintenance "1:4,5;2:4,5;3:4,5;4:4,5" \
     --unscheduled skip \
-    --gurobi-time-limit-sec 120 \
-    --out results/grid_search/grid_search_results_two_shift_v2.csv
+    --gurobi-time-limit-sec 7200 \
+    --out results/grid_search/grid_search_results_two_shift_v3.csv
 
 python -m src.visualization.plot_heatmaps \
-    --csv results/grid_search/grid_search_results_two_shift_v2.csv \
+    --csv results/grid_search/grid_search_results_two_shift_v3.csv \
     --out-dir results/figures
 
 python -m src.visualization.plot_phase_diagram \
-    --csv results/grid_search/grid_search_results_two_shift_v2.csv \
+    --csv results/grid_search/grid_search_results_two_shift_v3.csv \
     --out-dir results/figures
