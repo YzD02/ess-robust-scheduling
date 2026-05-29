@@ -1,0 +1,112 @@
+MES Daily Production History EDA — Parts Injection Machine No.033
+Item: ASSY COVER TOP  |  Period: Jan–Apr 2026  |  n=93 operating days
+======================================================================
+
+======================================================================
+  1. PRODUCTION ACHIEVEMENT ANALYSIS
+======================================================================
+
+--- Overall (all 93 operating days) ---
+  Achievement rate                                       n=  93  mean=   0.844  median=   0.988  std=  0.343  min=   0.000  p10=   0.240  p90=   1.125  max=   1.395
+  Actual output (units/day)                              n=  93  mean= 986.806  median=1133.000  std=418.599  min=   0.000  p10= 213.000  p90=1351.000  max=1410.000
+  Planned qty (units/day)                                n=  93  mean=1149.462  median=1200.000  std=161.261  min= 500.000  p10=1040.000  p90=1200.000  max=1200.000
+
+  Days below plan (ach < 1.0): 47 / 93 = 50.5%
+  Zero-production days (complete stoppage): 4
+  Dates: 2026-01-24, 2026-01-31, 2026-02-07, 2026-02-15
+
+--- Monthly breakdown ---
+
+  Jan (n=26):
+    Achievement rate                                     n=  26  mean=   0.789  median=   0.930  std=  0.353  min=   0.000  p10=   0.225  p90=   1.100  max=   1.150
+  Below plan: 15 / 26 = 57.7%
+
+  Feb (n=26):
+    Achievement rate                                     n=  26  mean=   0.797  median=   1.044  std=  0.430  min=   0.000  p10=   0.075  p90=   1.125  max=   1.175
+  Below plan: 11 / 26 = 42.3%
+
+  Mar (n=22):
+    Achievement rate                                     n=  22  mean=   0.979  median=   1.075  std=  0.210  min=   0.550  p10=   0.609  p90=   1.136  max=   1.175
+  Below plan: 7 / 22 = 31.8%
+
+  Apr (n=19):
+    Achievement rate                                     n=  19  mean=   0.825  median=   0.787  std=  0.303  min=   0.000  p10=   0.590  p90=   1.091  max=   1.395
+  Below plan: 14 / 19 = 73.7%
+
+--- Mold generation effect ---
+
+  2nd Gen (n=11):
+    Achievement rate                                     n=  11  mean=   0.550  median=   0.390  std=  0.449  min=   0.000  p10=   0.000  p90=   1.113  max=   1.113
+  Below plan: 8 / 11 = 72.7%
+  Mean actual output: 601 units/day
+
+  3rd Gen (n=82):
+    Achievement rate                                     n=  82  mean=   0.883  median=   1.006  std=  0.309  min=   0.000  p10=   0.460  p90=   1.125  max=   1.395
+  Below plan: 39 / 82 = 47.6%
+  Mean actual output: 1039 units/day
+
+  NOTE: 2nd Gen mold (n=11, Jan) shows dramatically lower achievement (mean=0.55, median=0.39)
+  vs 3rd Gen (mean=0.88, median=1.01). The 2nd Gen period should be
+  treated as a transition/burn-in phase, not representative of steady-state.
+
+======================================================================
+  2. QUALITY AND DEFECT ANALYSIS
+======================================================================
+
+--- Overall defect statistics ---
+  Defect rate (%)                                        n=  93  mean=   3.093  median=   0.295  std= 14.615  min=   0.000  p10=   0.000  p90=   2.535  max= 100.000
+  Good product rate (%)                                  n=  93  mean=  92.606  median=  99.623  std= 24.552  min=   0.000  p10=  93.635  p90= 100.000  max= 100.000
+  Defective qty (units/day)                              n=  93  mean=   6.022  median=   3.000  std=  8.826  min=   0.000  p10=   0.000  p90=  21.200  max=  41.000
+
+  Total defective over period: 560 / 91773 = 0.61%
+  Days with defect rate > 5%: 7 / 93
+  Dates and rates:
+    2026-01-21: 14.3% (30 defective)
+    2026-01-21: 5.8% (41 defective)
+    2026-01-23: 6.5% (25 defective)
+    2026-02-03: 100.0% (5 defective)
+    2026-02-09: 8.8% (26 defective)
+    2026-02-11: 10.9% (11 defective)
+    2026-04-06: 100.0% (5 defective)
+
+--- Mold generation effect on quality ---
+
+  2nd Gen: mean defect rate = 11.20%, median = 0.00%
+
+  3rd Gen: mean defect rate = 2.00%, median = 0.35%
+
+======================================================================
+  3. UPSTREAM SUPPLY RISK FOR THE TOP TAPE LINE
+======================================================================
+
+  Both the injection machine and the TOP Tape line target 1200 units/day.
+  When the injection machine produces fewer than 1200 units, the TOP Tape
+  line may not have enough parts to meet its own daily plan.
+
+  Days where injection output < 1200 (supply risk): 49 / 93 = 52.7%
+    Supply shortfall on those days (units)               n=  49  mean= 502.367  median= 372.000  std=390.432  min=  15.000  p10=  89.000  p90=1195.000  max=1200.000
+
+  Median daily shortfall when at risk: 372 units
+  = 31.0% of the daily plan
+  = 1.9 model jobs worth of missing parts
+
+--- Cross-reference with TOP Tape EDA ---
+
+  Injection machine below-plan rate:  50.5%
+  TOP Tape line below-plan rate:      43.2%
+
+  The injection machine is LESS reliable than the TOP Tape line itself.
+
+  3rd Gen only (steady-state, n=82):
+  Injection below-plan rate: 47.6% (vs 50.5% overall)
+  This is still higher than TOP Tape's 43.2%, confirming the machine
+  is a genuine upstream bottleneck even under normal operating conditions.
+
+  Modelling implication:
+  The current scheduling model captures PM windows, machine micro-stops,
+  and processing variability on the TOP Tape line itself. It does NOT yet
+  model upstream parts starvation. On 52.7% of days, the injection machine
+  produced fewer than 1,200 parts — meaning the TOP Tape line would face
+  a material shortage independent of any scheduling decision. Adding an
+  upstream disruption layer based on this machine's achievement distribution
+  would improve the model's realism significantly.

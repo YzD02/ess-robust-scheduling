@@ -1,0 +1,2 @@
+heuristic,n_jobs,k,replications,pm_suppresses_stops_days,pm_duration_min,mroc_star,avg_total_stop_delay_min,avg_weekend_used_time,avg_final_completion_day,avg_n_spillover_days,avg_n_weekend_days_used,prob_cleared_within_weekdays,prob_cleared_within_extended_horizon
+EDD_SPT,125,0.5,50,0,0.0,6912.739522612702,661.2772583530567,5591.855660649113,28,25.82,8,0.0,0.2
