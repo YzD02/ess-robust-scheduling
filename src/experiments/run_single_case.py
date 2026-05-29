@@ -116,6 +116,18 @@ def main():
             "If omitted, uses DEFAULT_UNSCHEDULED_WEEKS_POLICY from src/utils/maintenance.py."
         ),
     )
+    parser.add_argument(
+        "--pm-suppresses-stops-days",
+        type=int,
+        default=0,
+        help=(
+            "Number of calendar days after each PM event during which machine "
+            "micro-stops are fully suppressed (0 = no suppression, baseline condition; "
+            "7 = proactive PM condition for MCRR experiment). "
+            "When set to 7, each PM event eliminates all micro-stops for the "
+            "following 7 calendar days — including the PM day itself."
+        ),
+    )
     args = parser.parse_args()
 
     n_jobs       = args.n_jobs
@@ -204,6 +216,10 @@ def main():
         weekend_variable_cost=8.0,    # cost per minute used on a weekend day
         maintenance_duration=120.0,   # planned maintenance window per week (minutes)
         shifts_per_day=2,             # day shift + night shift per calendar day
+        pm_suppresses_stops_days=args.pm_suppresses_stops_days,
+        # When > 0, machine micro-stops are fully suppressed for this many
+        # calendar days following each PM event.  Set to 0 for the reactive
+        # baseline (no suppression).  Set to 7 for the proactive PM condition.
     )
 
     # -----------------------------------------------------------------------
@@ -328,6 +344,13 @@ def main():
             'weekend_day_used': d.weekend_day_used,
             'maintenance_start_day': d.maintenance_start_day,
             'maintenance_end_day': d.maintenance_end_day,
+            # MCRR cost components (cost = 1 unit per lost minute)
+            'stop_delay_total_min': sum(
+                det.get('stop_delay', 0.0) for det in d.job_details.values()
+            ) if d.job_details else 0.0,
+            'stop_count_total': sum(
+                det.get('stop_count', 0) for det in d.job_details.values()
+            ) if d.job_details else 0,
         })
     if first_overflow_day is not None:
         for row in day_rows:
@@ -371,6 +394,7 @@ def main():
         'ct_proxy_whole_line_takt_min_per_unit': 0.78,
         'approx_units_per_model_job': 192,
         'shifts_per_day': policy.shifts_per_day,
+        'pm_suppresses_stops_days': policy.pm_suppresses_stops_days,
         'daily_capacity_min': C_std,
         'mean_uptime_between_stops': stop_cfg.mean_uptime_between_stops,
         'mean_stop_duration': stop_cfg.mean_stop_duration,
@@ -389,6 +413,7 @@ def main():
         'prob_any_weekend_use': summary['prob_any_weekend_use'],
         'avg_weekend_used_time': summary['avg_weekend_used_time'],
         'avg_total_weekend_cost': summary['avg_total_weekend_cost'],
+        'avg_total_stop_delay_min': summary.get('avg_total_stop_delay_min', None),
         'avg_final_completion_day': summary['avg_final_completion_day'],
     }])
     summary_csv_path = out_dir / 'single_run_mc_summary.csv'

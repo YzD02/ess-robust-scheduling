@@ -102,6 +102,7 @@ def summarize_instance_parameters(*, mu_A, mu_B, sigma_A, sigma_B, p_nominal, p_
 def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_seed,
                       weekday_days, weekend_extension_days, C_std, Cost_OT, Cost_fix, M,
                       gurobi_time_limit_sec, weekend_fixed_cost, weekend_variable_cost,
+                      pm_suppresses_stops_days=0,
                       maintenance_map=None, candidate_days=None,
                       unscheduled_weeks_policy='random', output_flag=0):
     # Batch-level job abstraction retained:
@@ -163,6 +164,9 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         weekend_variable_cost=weekend_variable_cost,
         maintenance_duration=120.0,
         shifts_per_day=2,             # day shift + night shift per calendar day
+        pm_suppresses_stops_days=pm_suppresses_stops_days,
+        # 0 = reactive baseline (no suppression)
+        # 7 = proactive PM condition (suppress stops for 7 days after each PM)
     )
     # Data-informed micro-stop layer from Jan-Apr Automation Results.
     # Median values are used to reduce the influence of outlier days.
@@ -184,6 +188,7 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         'ct_proxy_whole_line_takt_min_per_unit': 0.78,
         'approx_units_per_model_job': 192,
         'shifts_per_day': policy.shifts_per_day,
+        'pm_suppresses_stops_days': policy.pm_suppresses_stops_days,
         'daily_capacity_min': C_std,
         'mean_uptime_between_stops': stop_cfg.mean_uptime_between_stops,
         'mean_stop_duration': stop_cfg.mean_stop_duration,
@@ -248,6 +253,11 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         'prob_any_weekend_use': summary['prob_any_weekend_use'],
         'avg_weekend_used_time': summary['avg_weekend_used_time'],
         'avg_total_weekend_cost': summary['avg_total_weekend_cost'],
+        # MCRR cost components (cost = 1 unit per lost minute)
+        # avg_total_stop_delay_min: mean total micro-stop lost time across all
+        # replications (sum over all jobs and all days in the horizon).
+        # Combined with avg_total_weekend_cost this gives the full cost for MCRR.
+        'avg_total_stop_delay_min': summary.get('avg_total_stop_delay_min', None),
         'avg_final_completion_day': summary['avg_final_completion_day'],
     })
     row['system_ok'] = accepted_for_simulation and summary['prob_cleared_within_extended_horizon'] is not None and summary['prob_cleared_within_extended_horizon'] >= 0.95
@@ -267,6 +277,12 @@ def main():
     parser.add_argument('--weekend-fixed-cost', type=float, default=300.0, help='Fixed cost for activating one weekend extension day.')
     parser.add_argument('--weekend-variable-cost', type=float, default=8.0, help='Variable cost per minute used in a weekend extension day.')
     parser.add_argument('--gurobi-time-limit-sec', type=float, default=120.0, help='Max solve time for Gurobi (seconds). Use 120 for local tests, 7200 for cluster runs.')
+    parser.add_argument('--pm-suppresses-stops-days', type=int, default=0,
+                        help=(
+                            'Number of calendar days after each PM event during which '
+                            'machine micro-stops are fully suppressed. '
+                            '0 = reactive baseline; 7 = proactive PM condition (MCRR experiment).'
+                        ))
     parser.add_argument('--seed', type=int, default=42, help='Base random seed.')
     parser.add_argument('--output-flag', type=int, default=0, help='Gurobi OutputFlag (0 or 1).')
     parser.add_argument(
@@ -338,6 +354,7 @@ def main():
                         gurobi_time_limit_sec=args.gurobi_time_limit_sec,
                         weekend_fixed_cost=args.weekend_fixed_cost,
                         weekend_variable_cost=args.weekend_variable_cost,
+                        pm_suppresses_stops_days=args.pm_suppresses_stops_days,
                         maintenance_map=maintenance_map,
                         candidate_days=candidate_days,
                         unscheduled_weeks_policy=unscheduled_weeks_policy,

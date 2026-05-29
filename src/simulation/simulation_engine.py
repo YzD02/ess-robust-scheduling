@@ -19,7 +19,9 @@ It is intentionally **not** passed into this simulation layer.
 In the simulation, Station A variability is instead modelled through a
 **machine-stop process**: the automated busbar assembly machine experiences
 random micro-stops whose inter-arrival times and durations follow exponential
-and gamma distributions respectively (see ``MachineStopConfig``).  This is a
+and gamma distributions respectively (see ``MachineStopConfig``).  Machine
+stops can be suppressed for a rolling 7-day window following each PM event
+(see ``pm_suppresses_stops_days`` in ``SimulationPolicy``).  This is a
 more realistic representation of automated-equipment behaviour than additive
 Gaussian noise.
 
@@ -73,6 +75,12 @@ class SimulationPolicy:
     weekend_variable_cost: float = 8.0
     maintenance_duration: float = 120.0
     shifts_per_day: int = 2  # number of consecutive shifts per calendar day
+    pm_suppresses_stops_days: int = 0
+    # Number of calendar days following a PM event during which machine
+    # micro-stops are fully suppressed.  For example, if PM occurs on day 4
+    # and pm_suppresses_stops_days=7, then days 4 through 10 (inclusive) have
+    # zero micro-stops.  Days before the PM event are unaffected.
+    # Set to 0 (default) to disable suppression — normal stop behaviour applies.
 
 
 @dataclass
@@ -618,6 +626,12 @@ def simulate_horizon_with_backlog(
             m_start = maint_window[0] if is_day_shift else None
             m_end   = maint_window[1] if is_day_shift else None
 
+            # Use suppressed stop config if this calendar day falls within
+            # the PM suppression window; otherwise use the normal config.
+            effective_stop_cfg = (
+                _no_stop_cfg if cal_day in _suppressed_days else stop_cfg
+            )
+
             shift_result = execute_one_day_with_backlog(
                 day_index=cal_day,
                 day_type=day_type,
@@ -630,7 +644,7 @@ def simulate_horizon_with_backlog(
                 mu_B=mu_B,
                 low_B=low_B,
                 high_B=high_B,
-                stop_cfg=stop_cfg,
+                stop_cfg=effective_stop_cfg,
                 maintenance_start_day=m_start,
                 maintenance_end_day=m_end,
                 simulation_run=simulation_run,
@@ -641,6 +655,23 @@ def simulate_horizon_with_backlog(
             max_backlog = max(max_backlog, len(backlog))
 
         return shift_results
+
+    # ---- Build PM suppression set ----
+    # For each PM event, all calendar days in [pm_day, pm_day + suppress_days - 1]
+    # (inclusive) will have machine stops fully suppressed.
+    # Days BEFORE the PM event are NOT suppressed — only the PM day onward.
+    _suppressed_days: set[int] = set()
+    if policy.pm_suppresses_stops_days > 0 and _maintenance_map:
+        for pm_day in _maintenance_map:
+            for offset in range(policy.pm_suppresses_stops_days):
+                _suppressed_days.add(pm_day + offset)
+
+    # A no-stop config used on suppressed days (effectively infinite uptime)
+    _no_stop_cfg = MachineStopConfig(
+        mean_uptime_between_stops=1e9,  # never stops
+        mean_stop_duration=stop_cfg.mean_stop_duration,
+        stop_duration_cv=stop_cfg.stop_duration_cv,
+    )
 
     # ---- Phase 1: work through all planned weekdays (two shifts each) ----
     for day in all_weekdays:
@@ -806,6 +837,7 @@ def monte_carlo_breakdown_analysis(
     weekend_used_time_list: List[float] = []
     total_weekend_cost_list: List[float] = []
     final_completion_day_list: List[int] = []
+    total_stop_delay_list: List[float] = []   # total micro-stop lost time per replication
     # Track per-calendar-day end-of-day backlog (after both shifts complete)
     day_backlog_end = {day: [] for day in schedule_dict}
 
@@ -836,6 +868,13 @@ def monte_carlo_breakdown_analysis(
         total_weekend_cost_list.append(out.total_weekend_cost)
         if out.final_completion_day is not None:
             final_completion_day_list.append(out.final_completion_day)
+        # Total micro-stop lost time across all shifts and jobs this replication
+        total_stop_delay = sum(
+            detail.get('stop_delay', 0.0)
+            for (cal_day, s_idx), day_result in out.days.items()
+            for detail in day_result.job_details.values()
+        )
+        total_stop_delay_list.append(total_stop_delay)
         for day in schedule_dict:
             # Use the night shift (last shift) end-of-day backlog for this calendar day
             night_key = (day, policy.shifts_per_day - 1)
@@ -856,6 +895,7 @@ def monte_carlo_breakdown_analysis(
         'prob_any_weekend_use': sum(1 for x in n_weekend_days_used_list if x > 0) / n_replications,
         'avg_weekend_used_time': statistics.mean(weekend_used_time_list),
         'avg_total_weekend_cost': statistics.mean(total_weekend_cost_list),
+        'avg_total_stop_delay_min': statistics.mean(total_stop_delay_list) if total_stop_delay_list else None,
         'avg_final_completion_day': statistics.mean(final_completion_day_list) if final_completion_day_list else None,
         'day_level': {},
     }
