@@ -104,7 +104,9 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
                       gurobi_time_limit_sec, weekend_fixed_cost, weekend_variable_cost,
                       pm_suppresses_stops_days=0,
                       maintenance_map=None, candidate_days=None,
-                      unscheduled_weeks_policy='random', output_flag=0):
+                      unscheduled_weeks_policy='random', output_flag=0,
+                      mip_gap=0.01, use_indicator_constraints=True,
+                      add_symmetry_breaking=True, add_global_ot_cut=True):
     # Batch-level job abstraction retained:
     #   one job = one production workload block, not one physical unit.
     # Station-level C/T is not directly available in the company data, so the
@@ -147,6 +149,10 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         M=M,
         time_limit_sec=gurobi_time_limit_sec,
         output_flag=output_flag,
+        mip_gap=mip_gap,
+        use_indicator_constraints=use_indicator_constraints,
+        add_symmetry_breaking=add_symmetry_breaking,
+        add_global_ot_cut=add_global_ot_cut,
     )
     solve_wall_time = time.time() - t0
 
@@ -198,6 +204,7 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         'solve_wall_time_sec': solve_wall_time,
         'accepted_for_simulation': accepted_for_simulation,
         'objective_value': gurobi_result.objective_value,
+        'achieved_mip_gap': gurobi_result.mip_gap,
         'planned_total_ot': gurobi_result.planned_total_ot,
         'n_days_with_planned_ot': gurobi_result.n_days_with_planned_ot,
     }
@@ -285,6 +292,16 @@ def main():
                         ))
     parser.add_argument('--seed', type=int, default=42, help='Base random seed.')
     parser.add_argument('--output-flag', type=int, default=0, help='Gurobi OutputFlag (0 or 1).')
+    parser.add_argument('--mip-gap', type=float, default=0.01,
+                        help='Gurobi MIPGap tolerance (default 0.01 = 1%%). '
+                             'A schedule within 1%% of optimal is operationally '
+                             'indistinguishable once fed into Monte Carlo simulation.')
+    parser.add_argument('--no-indicator-constraints', action='store_true',
+                        help='Disable indicator constraints; fall back to tight big-M only.')
+    parser.add_argument('--no-symmetry-breaking', action='store_true',
+                        help='Disable non-increasing daily load ordering constraints.')
+    parser.add_argument('--no-global-ot-cut', action='store_true',
+                        help='Disable the global overtime lower-bound cut.')
     parser.add_argument(
         '--maintenance', type=str, default=None,
         help=(
@@ -350,7 +367,7 @@ def main():
                         C_std=960.0,        # two-shift daily capacity
                         Cost_OT=5.0,
                         Cost_fix=180.0,
-                        M=50000.0,          # big-M: must exceed max possible daily load
+                        M=50000.0,          # kept for backward compat; replaced internally
                         gurobi_time_limit_sec=args.gurobi_time_limit_sec,
                         weekend_fixed_cost=args.weekend_fixed_cost,
                         weekend_variable_cost=args.weekend_variable_cost,
@@ -359,6 +376,10 @@ def main():
                         candidate_days=candidate_days,
                         unscheduled_weeks_policy=unscheduled_weeks_policy,
                         output_flag=args.output_flag,
+                        mip_gap=args.mip_gap,
+                        use_indicator_constraints=not args.no_indicator_constraints,
+                        add_symmetry_breaking=not args.no_symmetry_breaking,
+                        add_global_ot_cut=not args.no_global_ot_cut,
                     )
                     rows.append(row)
                     pd.DataFrame(rows).to_csv(out_path, index=False)
