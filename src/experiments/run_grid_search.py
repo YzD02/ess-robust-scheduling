@@ -32,6 +32,7 @@ For a larger stress grid, override --n-values, --k-values, and --replications.
 """
 
 import argparse
+import json
 from pathlib import Path
 import time
 from typing import Any
@@ -41,6 +42,7 @@ import pandas as pd
 from src.models.job_generation import JobGenerationConfig, generate_job_parameters
 from src.models.robust_processing import compute_robust_processing_times
 from src.models.gurobi_baseline import solve_gurobi_baseline
+from src.models.warm_start_io import load_warm_start_schedule
 from src.simulation.simulation_engine import (
     SimulationPolicy,
     MachineStopConfig,
@@ -106,7 +108,8 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
                       maintenance_map=None, candidate_days=None,
                       unscheduled_weeks_policy='random', output_flag=0,
                       mip_gap=0.01, use_indicator_constraints=True,
-                      add_symmetry_breaking=True, add_global_ot_cut=True):
+                      add_symmetry_breaking=True, add_global_ot_cut=True,
+                      schedule_out_dir=None, warm_start_schedule=None):
     # Batch-level job abstraction retained:
     #   one job = one production workload block, not one physical unit.
     # Station-level C/T is not directly available in the company data, so the
@@ -153,8 +156,32 @@ def evaluate_one_case(*, n_jobs, mu_scale, sigma_scale, k, replications, random_
         use_indicator_constraints=use_indicator_constraints,
         add_symmetry_breaking=add_symmetry_breaking,
         add_global_ot_cut=add_global_ot_cut,
+        warm_start_schedule=warm_start_schedule,
     )
     solve_wall_time = time.time() - t0
+
+    # Dump the raw and sorted schedules to disk whenever a feasible solution
+    # exists -- regardless of whether the case is later accepted into the
+    # Monte Carlo simulation.  This is what makes the schedule available for
+    # warm-starting other (n, k) cases later (e.g. seeding k=1.0 from a
+    # k=0.5 feasible solution per Johnny's suggestion).
+    if schedule_out_dir is not None and gurobi_result.sorted_schedule is not None:
+        schedule_out_dir = Path(schedule_out_dir)
+        schedule_out_dir.mkdir(parents=True, exist_ok=True)
+        schedule_path = schedule_out_dir / f"schedule_n{n_jobs}_k{k}.json"
+        schedule_payload = {
+            'n_jobs': n_jobs,
+            'k': k,
+            'gurobi_status': gurobi_result.status,
+            'achieved_mip_gap': gurobi_result.mip_gap,
+            'objective_value': gurobi_result.objective_value,
+            'solve_time_sec': gurobi_result.solve_time_sec,
+            # JSON object keys must be strings -- day numbers are cast accordingly.
+            'sorted_schedule': {str(day): job_list for day, job_list in gurobi_result.sorted_schedule.items()},
+            'p_robust': {str(j): p_robust[j] for j in jobs},
+        }
+        with open(schedule_path, 'w') as f:
+            json.dump(schedule_payload, f, indent=2)
 
     accepted_for_simulation = (
         gurobi_result.sorted_schedule is not None and gurobi_result.solve_time_sec <= gurobi_time_limit_sec
@@ -279,6 +306,20 @@ def main():
     parser.add_argument('--k-values', type=str, default='0.5,1.0,1.5', help='Comma-separated k values.')
     parser.add_argument('--replications', type=int, default=DEFAULT_REPLICATIONS, help='Monte Carlo replications for accepted cases.')
     parser.add_argument('--out', type=str, default='results/grid_search/grid_search_results_data_calibrated_quick.csv', help='Output CSV path.')
+    parser.add_argument('--save-schedule-dir', type=str, default=None,
+                        help='If set, dump the Gurobi sorted_schedule (job-to-day assignment) '
+                             'as JSON to this directory for every case, regardless of whether '
+                             'it is accepted into Monte Carlo simulation. One file per (n, k) '
+                             'combination, e.g. schedule_n125_k0.5.json. Useful for warm-starting '
+                             'harder cases from an easier case\'s feasible solution.')
+    parser.add_argument('--warm-start-from', type=str, default=None,
+                        help='Path to a schedule_n{n}_k{k}.json file (produced by '
+                             '--save-schedule-dir) to use as a warm start for every case in '
+                             'this run. The day-assignment is given to Gurobi as an initial '
+                             'incumbent via .Start hints (Johnny item 3) -- it does not change '
+                             'the feasible region, only the search starting point. Typical use: '
+                             'warm-start the hard k=1.0, n=125 case from an easier k=0.5 '
+                             'feasible solution.')
     parser.add_argument('--weekday-days', type=int, default=20, help='Number of weekday bins planned by Gurobi.')
     parser.add_argument('--weekend-extension-days', type=int, default=8, help='Number of weekend extension bins available in simulation.')
     parser.add_argument('--weekend-fixed-cost', type=float, default=300.0, help='Fixed cost for activating one weekend extension day.')
@@ -338,6 +379,16 @@ def main():
     rows: list[dict[str, Any]] = []
     total_cases = len(n_values) * len(mu_scales) * len(sigma_scales) * len(k_values)
     case_idx = 0
+
+    # Load the warm-start schedule once (if provided) -- it is reused for every
+    # (n, k) combination in this run rather than re-read from disk each time.
+    warm_start_schedule = None
+    if args.warm_start_from is not None:
+        warm_start_schedule = load_warm_start_schedule(args.warm_start_from)
+        print(f'Loaded warm start from {args.warm_start_from} '
+              f'({len(warm_start_schedule)} days, '
+              f'{sum(len(v) for v in warm_start_schedule.values())} jobs).')
+
     print('\n======================================')
     print('Weekend-Extension Grid Search Started')
     print('======================================')
@@ -380,6 +431,8 @@ def main():
                         use_indicator_constraints=not args.no_indicator_constraints,
                         add_symmetry_breaking=not args.no_symmetry_breaking,
                         add_global_ot_cut=not args.no_global_ot_cut,
+                        schedule_out_dir=args.save_schedule_dir,
+                        warm_start_schedule=warm_start_schedule,
                     )
                     rows.append(row)
                     pd.DataFrame(rows).to_csv(out_path, index=False)

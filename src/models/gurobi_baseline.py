@@ -85,6 +85,7 @@ def solve_gurobi_baseline(
     use_indicator_constraints: bool = True,   # replaces big-M with indicator constraint
     add_symmetry_breaking: bool = True,       # non-increasing daily load ordering
     add_global_ot_cut: bool = True,           # valid lower bound on total overtime
+    warm_start_schedule: Dict[int, List[int]] | None = None,  # Johnny item 3: warm start
 ) -> GurobiBaselineResult:
     """Solve the baseline day-assignment model with tightened formulation.
 
@@ -112,6 +113,19 @@ def solve_gurobi_baseline(
        The schedule is fed into a Monte Carlo simulation, so a plan provably within
        1% of optimal is operationally indistinguishable from the true optimum.
        Reporting the achieved gap alongside the objective is honest and sufficient.
+
+    5. Warm start (Johnny item 3)
+       If `warm_start_schedule` is provided (e.g. a feasible solution from an
+       easier case such as k=0.5), Gurobi is given this as an initial incumbent
+       via variable .Start hints. This does not change the feasible region — the
+       day-assignment is just a starting point for branch-and-bound, which can
+       close the gap faster from the incumbent side. A schedule built for a
+       different k still works as a warm start for a new k: it is simply a
+       feasible day assignment that Gurobi will repair/improve as needed (and
+       if the inherited assignment is infeasible at the new p_robust values --
+       e.g. capacity is violated even with overtime -- Gurobi discards it and
+       falls back to its own search, so providing a stale schedule never causes
+       an error, only a wasted hint).
 
     Notes
     -----
@@ -146,6 +160,33 @@ def solve_gurobi_baseline(
 
     # Daily load auxiliary variable (needed for symmetry-breaking constraint).
     load = model.addVars(days, vtype=GRB.CONTINUOUS, lb=0.0, name="load")
+
+    # -------------------------
+    # Warm start (Johnny item 3)
+    #
+    # Seed z[j, t] from a feasible day-assignment computed elsewhere (e.g. the
+    # k=0.5 solution, used to warm-start the harder k=1.0 case). Gurobi treats
+    # .Start hints as suggestions, not constraints: if the inherited assignment
+    # doesn't satisfy capacity at the new p_robust values, Gurobi simply repairs
+    # or discards it during presolve. Jobs not mentioned in warm_start_schedule
+    # (e.g. if job sets differ between the source and target case) are left for
+    # Gurobi to place on its own -- no error is raised either way.
+    # -------------------------
+    if warm_start_schedule is not None:
+        # Build job -> day lookup from the warm-start schedule for O(1) access.
+        warm_job_to_day: dict[int, int] = {}
+        for day, job_list in warm_start_schedule.items():
+            for j in job_list:
+                warm_job_to_day[j] = day
+
+        for j in jobs:
+            seed_day = warm_job_to_day.get(j)
+            for t in days:
+                # 1.0 if this job was on this day in the warm-start schedule, else 0.0.
+                # Jobs absent from the warm start (seed_day is None) get no hint at
+                # all on any day -- Gurobi decides freely for those.
+                if seed_day is not None:
+                    z[j, t].Start = 1.0 if t == seed_day else 0.0
 
     # -------------------------
     # Objective
